@@ -1,0 +1,17 @@
+# All build outputs (bootloader, kernel.bin, disk images)
+/build/
+/docs/
+
+# Each system module's build output, real and test-only. Listed here so a new
+# module is covered without a .gitignore of its own.
+/sysmodules/*/build/
+/sysmodules/*/out/
+/sysmodules/tests/*/build/
+/sysmodules/tests/*/out/
+
+# KIPs that `make install` copies in for scripts/run-qemu.sh; the folder itself
+# is kept (kips/.gitkeep) because the install targets copy into it.
+/kips/*.kip
+
+__pycache__/
+.DS_Store

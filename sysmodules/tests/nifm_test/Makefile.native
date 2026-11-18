@@ -1,0 +1,47 @@
+# Independent devkitPro/libnx build for the nifm_test module.
+# The module's release, debug and audit outputs follow the usual project layout.
+DEVKITPRO ?= /opt/devkitpro
+export DEVKITPRO
+TOOLCHAIN := $(DEVKITPRO)/devkitA64/bin/aarch64-none-elf-
+CC := $(TOOLCHAIN)gcc
+CXX := $(TOOLCHAIN)g++
+ELF2KIP := $(DEVKITPRO)/tools/bin/elf2kip
+VARIANT ?= release
+BUILD := build/native/$(VARIANT)
+OUT := out/nintendo_nx_arm64_armv8a/$(VARIANT)
+TARGET := $(OUT)/nifm_test
+
+SOURCES := source/nifm_test_main.cpp
+OBJECTS := $(foreach src,$(SOURCES),$(BUILD)/$(subst ../../common/,common/,$(src)).o)
+INCLUDES := -I../../common/include -I../../.. -I$(DEVKITPRO)/libnx/include
+# Debug and audit use the smaller optimization level; project assertions are
+# active in all variants and do not depend on Atmosphere build defines.
+OPTIMIZATION := $(if $(filter release,$(VARIANT)),-O2,-Os)
+COMMON_FLAGS := -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft $(OPTIMIZATION) -g \
+    -Wall -Wextra -Werror -Wno-missing-field-initializers -fPIE -ffunction-sections -fdata-sections \
+    -fno-strict-aliasing -fwrapv -D__SWITCH__ -D_GNU_SOURCE $(INCLUDES)
+CXXFLAGS := $(COMMON_FLAGS) -std=gnu++23 -fno-exceptions -fno-rtti
+CFLAGS := $(COMMON_FLAGS) -std=gnu11
+LDFLAGS := -specs=$(DEVKITPRO)/libnx/switch.specs -fPIE -march=armv8-a+crc+crypto -mtune=cortex-a57 \
+    -mtp=soft -Wl,-Map,$(TARGET).map -Wl,-z,relro,-z,now
+
+.PHONY: all clean
+all: $(TARGET).kip
+
+$(TARGET).kip: $(TARGET).elf nifm_test.json
+	$(ELF2KIP) $< nifm_test.json $@
+
+$(TARGET).elf: $(OBJECTS)
+	@mkdir -p $(OUT)
+	$(CXX) $(LDFLAGS) $(OBJECTS) -L$(DEVKITPRO)/libnx/lib -lnx -o $@
+
+define compile_source
+$(BUILD)/$(subst ../../common/,common/,$(1)).o: $(1)
+	@mkdir -p $$(dir $$@)
+	$(if $(filter %.cpp,$(1)),$(CXX) $(CXXFLAGS),$(CC) $(CFLAGS)) -MMD -MP -c $$< -o $$@
+endef
+$(foreach src,$(SOURCES),$(eval $(call compile_source,$(src))))
+
+-include $(OBJECTS:.o=.d)
+clean:
+	rm -rf $(BUILD) $(OUT)

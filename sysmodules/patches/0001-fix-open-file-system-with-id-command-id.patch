@@ -1,0 +1,27 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CompSciOrBust <54033033+CompSciOrBust@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 00:00:00 +0000
+Subject: [PATCH] fssrv: OpenFileSystemWithId is command 10 from 16.0.0
+
+16.0.0 added a form of IFileSystemProxy::OpenFileSystemWithId that takes
+content attributes.  It is command 10; command 8 keeps the old form
+(OpenFileSystemWithIdObsolete).  The interface table listed the new form
+as command 8, so a server built from it rejected the command 10 that
+libnx, and so every Atmosphere client, sends on 16.0.0 and later.
+Nothing in Atmosphere serves fsp-srv from this table, so it was not
+noticed there.
+
+---
+diff --git a/libraries/libstratosphere/include/stratosphere/fssrv/sf/fssrv_sf_i_file_system_proxy.hpp b/libraries/libstratosphere/include/stratosphere/fssrv/sf/fssrv_sf_i_file_system_proxy.hpp
+index 44b54ff12..721a0eef0 100644
+--- a/libraries/libstratosphere/include/stratosphere/fssrv/sf/fssrv_sf_i_file_system_proxy.hpp
++++ b/libraries/libstratosphere/include/stratosphere/fssrv/sf/fssrv_sf_i_file_system_proxy.hpp
+@@ -31,7 +31,7 @@
+     AMS_SF_METHOD_INFO(C, H,    7, Result, OpenFileSystemWithPatch,                                     (ams::sf::Out<ams::sf::SharedPointer<fssrv::sf::IFileSystem>> out, ncm::ProgramId program_id, u32 type),                                                  (out, program_id, type),                                hos::Version_2_0_0)                         \
+     AMS_SF_METHOD_INFO(C, H,    8, Result, OpenFileSystemWithIdObsolete,                                (ams::sf::Out<ams::sf::SharedPointer<fssrv::sf::IFileSystem>> out, const fssrv::sf::FspPath &path, u64 program_id, u32 type),                             (out, path, program_id, type),                          hos::Version_2_0_0)                         \
+     AMS_SF_METHOD_INFO(C, H,    9, Result, OpenDataFileSystemByProgramId,                               (ams::sf::Out<ams::sf::SharedPointer<fssrv::sf::IFileSystem>> out, ncm::ProgramId program_id),                                                            (out, program_id),                                      hos::Version_3_0_0)                         \
+-    AMS_SF_METHOD_INFO(C, H,    8, Result, OpenFileSystemWithId,                                        (ams::sf::Out<ams::sf::SharedPointer<fssrv::sf::IFileSystem>> out, const fssrv::sf::FspPath &path, fs::ContentAttributes attr, u64 program_id, u32 type), (out, path, attr, program_id, type),                    hos::Version_16_0_0)                        \
++    AMS_SF_METHOD_INFO(C, H,   10, Result, OpenFileSystemWithId,                                        (ams::sf::Out<ams::sf::SharedPointer<fssrv::sf::IFileSystem>> out, const fssrv::sf::FspPath &path, fs::ContentAttributes attr, u64 program_id, u32 type), (out, path, attr, program_id, type),                    hos::Version_16_0_0)                        \
+     AMS_SF_METHOD_INFO(C, H,   11, Result, OpenBisFileSystem,                                           (ams::sf::Out<ams::sf::SharedPointer<fssrv::sf::IFileSystem>> out, const fssrv::sf::FspPath &path, u32 id),                                               (out, path, id))                                                                                    \
+     AMS_SF_METHOD_INFO(C, H,   12, Result, OpenBisStorage,                                              (ams::sf::Out<ams::sf::SharedPointer<fssrv::sf::IStorage>> out, u32 id),                                                                                  (out, id))                                                                                          \
+     AMS_SF_METHOD_INFO(C, H,   13, Result, InvalidateBisCache,                                          (),                                                                                                                                                       ())                                                                                                 \

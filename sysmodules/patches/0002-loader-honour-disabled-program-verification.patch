@@ -1,0 +1,31 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CompSciOrBust <54033033+CompSciOrBust@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 00:00:00 +0000
+Subject: [PATCH] ldr: honour DisableProgramVerification on 23.0.0 and later
+
+Before 23.0.0, pm read the DisableProgramVerification configuration
+item from spl and told the loader to stop requiring a valid ACID
+signature.  23.0.0 removed spl from pm, so on later firmware nothing
+acts on the item and every program must be signed with Nintendo's key.
+This OS has no such signatures.  Read the item in the loader at
+start-up instead.  As before, it only takes effect on a development
+unit.
+
+---
+diff --git a/stratosphere/loader/source/ldr_main.cpp b/stratosphere/loader/source/ldr_main.cpp
+index 5e4d8ca06..709141e4f 100644
+--- a/stratosphere/loader/source/ldr_main.cpp
++++ b/stratosphere/loader/source/ldr_main.cpp
+@@ -140,6 +140,12 @@ namespace ams {
+         ldr::SetDevelopmentForAntiDowngradeCheck(spl::IsDevelopment());
+         ldr::SetDevelopmentForAcidSignatureCheck(spl::IsDevelopment());
+ 
++        /* Honour the configuration item that disables program verification. Before 23.0.0, pm */
++        /* read it and told us; pm no longer uses spl, so nothing would otherwise act on it. */
++        if (spl::IsDisabledProgramVerification()) {
++            ldr::SetEnabledProgramVerification(false);
++        }
++
+         /* Register the loader services. */
+         ldr::RegisterServiceSessions();
+ 

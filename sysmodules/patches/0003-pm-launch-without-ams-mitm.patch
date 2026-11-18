@@ -1,0 +1,49 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CompSciOrBust <54033033+CompSciOrBust@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 00:00:00 +0000
+Subject: [PATCH] pm: launch programs when ams.mitm is not running
+
+Before creating a process, pm asks ams.mitm (service mitm:pm) how much
+memory to reserve for it, and waits forever for that service if
+ams.mitm is absent.  This OS does not run ams.mitm.  Ask only if the
+service is registered, and reserve nothing otherwise.
+
+---
+diff --git a/stratosphere/pm/source/impl/pm_process_manager.cpp b/stratosphere/pm/source/impl/pm_process_manager.cpp
+index 5bd14732c..d882c56a0 100644
+--- a/stratosphere/pm/source/impl/pm_process_manager.cpp
++++ b/stratosphere/pm/source/impl/pm_process_manager.cpp
+@@ -144,19 +144,24 @@ namespace ams::pm::impl {
+                 /* If we fail after now, unpin. */
+                 ON_RESULT_FAILURE { R_DISCARD(ldr::pm::UnpinProgram(pin_id)); };
+ 
+-                /* Ensure we can talk to mitm services. */
++                /* Ask ams.mitm how much memory to set aside for it, if it is running. Its service is */
++                /* registered before boot2 starts anything, so on a system without ams.mitm it is absent. */
++                u64 mitm_boost_size = 0;
+                 {
+-                    AMS_FUNCTION_LOCAL_STATIC_CONSTINIT(bool, s_initialized_mitm, false);
+-                    if (!s_initialized_mitm) {
+-                        mitm::pm::Initialize();
+-                        s_initialized_mitm = true;
++                    bool has_mitm = false;
++                    R_TRY(sm::HasService(std::addressof(has_mitm), sm::ServiceName::Encode("mitm:pm")));
++
++                    if (has_mitm) {
++                        AMS_FUNCTION_LOCAL_STATIC_CONSTINIT(bool, s_initialized_mitm, false);
++                        if (!s_initialized_mitm) {
++                            mitm::pm::Initialize();
++                            s_initialized_mitm = true;
++                        }
++
++                        R_TRY(mitm::pm::PrepareLaunchProgram(std::addressof(mitm_boost_size), program_info.program_id, override_status, is_application));
+                     }
+                 }
+ 
+-                /* Determine boost size for mitm. */
+-                u64 mitm_boost_size = 0;
+-                R_TRY(mitm::pm::PrepareLaunchProgram(std::addressof(mitm_boost_size), program_info.program_id, override_status, is_application));
+-
+                 if (mitm_boost_size > 0 || is_application) {
+                     R_ABORT_UNLESS(BoostSystemMemoryResourceLimitForMitm(mitm_boost_size));
+                 }

@@ -1,0 +1,57 @@
+From d79e9784bdd24b422749e81554a3e6b7b8b1e48a Mon Sep 17 00:00:00 2001
+From: CompSciOrBust <54033033+CompSciOrBust@users.noreply.github.com>
+Date: Mon, 9 Nov 2026 21:34:29 +0000
+Subject: [PATCH] Fix compilation for non-NX boards
+
+---
+ libraries/libmesosphere/source/kern_k_io_pool.cpp | 6 ++++++
+ mesosphere/kernel/source/arch/arm64/init/start.s  | 1 +
+ 2 files changed, 7 insertions(+)
+
+diff --git a/libraries/libmesosphere/source/kern_k_io_pool.cpp b/libraries/libmesosphere/source/kern_k_io_pool.cpp
+index 869d8aeae..6108ca090 100644
+--- a/libraries/libmesosphere/source/kern_k_io_pool.cpp
++++ b/libraries/libmesosphere/source/kern_k_io_pool.cpp
+@@ -70,10 +70,13 @@ namespace ams::kern {
+             KScopedLightLock lk(g_io_pool_lock);
+ 
+             /* Check that the pool isn't already used. */
++            #pragma GCC diagnostic push
++            #pragma GCC diagnostic ignored "-Warray-bounds"
+             R_UNLESS(!g_pool_used[pool_type], svc::ResultBusy());
+ 
+             /* Set the pool as used. */
+             g_pool_used[pool_type] = true;
++            #pragma GCC diagnostic pop
+         }
+ 
+         /* Set our fields. */
+@@ -90,10 +93,13 @@ namespace ams::kern {
+         KScopedLightLock lk(g_io_pool_lock);
+ 
+         /* Check that the pool is used. */
++        #pragma GCC diagnostic push
++        #pragma GCC diagnostic ignored "-Warray-bounds"
+         MESOSPHERE_ASSERT(g_pool_used[m_pool_type]);
+ 
+         /* Set the pool as unused. */
+         g_pool_used[m_pool_type] = false;
++        #pragma GCC diagnostic pop
+     }
+ 
+     Result KIoPool::AddIoRegion(KIoRegion *new_region) {
+diff --git a/mesosphere/kernel/source/arch/arm64/init/start.s b/mesosphere/kernel/source/arch/arm64/init/start.s
+index ad483ffc2..b437aea87 100644
+--- a/mesosphere/kernel/source/arch/arm64/init/start.s
++++ b/mesosphere/kernel/source/arch/arm64/init/start.s
+@@ -14,6 +14,7 @@
+  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+  */
+ #include <mesosphere/kern_select_assembly_offsets.h>
++#include <mesosphere/kern_select_assembly_macros.h>
+ 
+ /* For some reason GAS doesn't know about it, even with .cpu cortex-a57 */
+ #define cpuactlr_el1 s3_1_c15_c2_0
+-- 
+2.43.0
+

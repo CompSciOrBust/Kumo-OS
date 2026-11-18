@@ -1,0 +1,459 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CompSciOrBust <54033033+CompSciOrBust@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 00:00:00 +0000
+Subject: [PATCH] kern: run on the cores the machine has, up to four
+
+The kernel started cores 1-3 unconditionally and then waited for all
+four (cpu::NumCores) at every SynchronizeAllCores, so a machine with
+fewer than four CPUs hung at boot.  On the generic-aarch64 board:
+
+- TurnOnAllCores starts cores 1, 2, ... up to the CPU count the firmware
+  reports (ACPI MADT, via the boot parameters; four if it gives none,
+  never more than four) with the board's TryCpuOn, which checks the PSCI
+  result.  The first core that fails to start ends the list.  Core 0
+  then fixes the number of present cores and the board's core map, and
+  only then lets the started cores into HorizonKernelMain.
+
+- cpu::GetNumPresentCores() and GetPresentCoreMask() (kern_cpu.hpp) give
+  that number.  Every place that iterates over, waits for, signals or
+  places a thread on "all cores" uses them instead of NumCores:
+  SynchronizeAllCores, DoOnEachCoreInOrder, the cache-maintenance IPIs,
+  the scheduler's per-core loop, KDpcManager (requests, rotation, which
+  core runs the preemption thread), the exit worker's core, interrupt
+  unbinding, thread termination and debug "current on any core" loops,
+  and the debugger-break thread list (absent cores report no thread).
+  NumCores remains the size of every per-core array.  On other boards
+  the two functions are constexpr and return NumCores, so their code is
+  unchanged.
+
+- Userland's virtual cores 0-3 and 63 are folded onto the present cores
+  by the board's VirtualToPhysicalCoreMap, now set at boot (system core
+  3 and 63 on the last core, applications on the others); so
+  ConvertVirtualCoreMaskToPhysical is no longer constexpr on this board,
+  and KCapabilities computes the initial processes' physical mask at run
+  time.  Kernel threads name physical cores and no longer go through
+  the map.  svcGetCurrentProcessorNumber returns the lowest virtual core
+  in the thread's affinity mask that maps to the core it is running on,
+  and svcGetInfo(IdleTickCount) takes a virtual core.  With four cores
+  the map is the identity and both give the answers they gave before.
+
+Other boards are unchanged.
+
+---
+diff --git a/libraries/libmesosphere/include/mesosphere/arch/arm64/kern_cpu.hpp b/libraries/libmesosphere/include/mesosphere/arch/arm64/kern_cpu.hpp
+index c58b71b..bd47109 100644
+--- a/libraries/libmesosphere/include/mesosphere/arch/arm64/kern_cpu.hpp
++++ b/libraries/libmesosphere/include/mesosphere/arch/arm64/kern_cpu.hpp
+@@ -38,6 +38,32 @@ namespace ams::kern::arch::arm64::cpu {
+     #error "Unknown Board for cpu::NumCores"
+ #endif
+ 
++    /* NumCores is how many cores the kernel is built for: the size of every per-core array. */
++    /* GetNumPresentCores() is how many of them run, as physical cores 0 to n - 1; the kernel */
++    /* must not wait for, signal or schedule on any other. */
++#if defined(ATMOSPHERE_BOARD_GENERIC_AARCH64)
++    /* This board runs on however many cores the machine has, up to NumCores. The count is set */
++    /* once, on core 0, before the other cores reach HorizonKernelMain, and is constant */
++    /* afterwards. Defined, with the board's core map, in kern_cpu_map.cpp. */
++    extern constinit s32 g_num_present_cores;
++
++    ALWAYS_INLINE size_t GetNumPresentCores() {
++        return static_cast<size_t>(g_num_present_cores);
++    }
++
++    ALWAYS_INLINE u64 GetPresentCoreMask() {
++        return (1ul << GetNumPresentCores()) - 1ul;
++    }
++#else
++    constexpr ALWAYS_INLINE size_t GetNumPresentCores() {
++        return NumCores;
++    }
++
++    constexpr ALWAYS_INLINE u64 GetPresentCoreMask() {
++        return (1ul << NumCores) - 1ul;
++    }
++#endif
++
+     constexpr inline u32 El0Aarch64PsrMask = 0xF0000000;
+     constexpr inline u32 El0Aarch32PsrMask = 0xFE0FFE20;
+ 
+diff --git a/libraries/libmesosphere/include/mesosphere/kern_k_dpc_manager.hpp b/libraries/libmesosphere/include/mesosphere/kern_k_dpc_manager.hpp
+index 97bae66..14cda20 100644
+--- a/libraries/libmesosphere/include/mesosphere/kern_k_dpc_manager.hpp
++++ b/libraries/libmesosphere/include/mesosphere/kern_k_dpc_manager.hpp
+@@ -31,7 +31,7 @@ namespace ams::kern {
+         public:
+             static void Initialize() {
+                 const s32 core_id = GetCurrentCoreId();
+-                if (core_id == static_cast<s32>(cpu::NumCores) - 1) {
++                if (core_id == static_cast<s32>(cpu::GetNumPresentCores()) - 1) {
+                     Initialize(core_id, DpcManagerPreemptionThreadPriority);
+                 } else {
+                     Initialize(core_id, DpcManagerNormalThreadPriority);
+diff --git a/libraries/libmesosphere/include/mesosphere/kern_select_cpu.hpp b/libraries/libmesosphere/include/mesosphere/kern_select_cpu.hpp
+index 756c12b..3e28579 100644
+--- a/libraries/libmesosphere/include/mesosphere/kern_select_cpu.hpp
++++ b/libraries/libmesosphere/include/mesosphere/kern_select_cpu.hpp
+@@ -77,7 +77,13 @@ namespace ams::kern {
+             return mask;
+         }();
+ 
++        #if defined(ATMOSPHERE_BOARD_GENERIC_AARCH64)
++        /* This board's map is set at boot from the number of cores present (kern_cpu_map.hpp), */
++        /* so the conversion cannot be done at compile time. */
++        static ALWAYS_INLINE u64 ConvertVirtualCoreMaskToPhysical(u64 v_core_mask) {
++        #else
+         static constexpr inline u64 ConvertVirtualCoreMaskToPhysical(u64 v_core_mask) {
++        #endif
+             u64 p_core_mask = 0;
+             while (v_core_mask != 0) {
+                 const u64 next = util::CountTrailingZeros(v_core_mask);
+diff --git a/libraries/libmesosphere/source/arch/arm64/kern_cpu.cpp b/libraries/libmesosphere/source/arch/arm64/kern_cpu.cpp
+index 36d7f9b..926b5de 100644
+--- a/libraries/libmesosphere/source/arch/arm64/kern_cpu.cpp
++++ b/libraries/libmesosphere/source/arch/arm64/kern_cpu.cpp
+@@ -231,7 +231,8 @@ namespace ams::kern::arch::arm64::cpu {
+                     KScopedLightLock lk(m_lock);
+ 
+                     /* Create core masks for us to use. */
+-                    constexpr u64 AllCoresMask = (1ul << cpu::NumCores) - 1ul;
++                    /* Only cores that run have a helper thread and take the interrupt. */
++                    const u64 AllCoresMask = cpu::GetPresentCoreMask();
+                     const u64 other_cores_mask = AllCoresMask & ~(1ul << GetCurrentCoreId());
+ 
+                     if ((op == Operation::InstructionMemoryBarrier) || (Kernel::GetState() == Kernel::State::Initializing)) {
+@@ -524,7 +525,7 @@ namespace ams::kern::arch::arm64::cpu {
+     }
+ 
+     void SynchronizeAllCores() {
+-        SynchronizeAllCoresImpl(&g_all_core_sync_count, static_cast<s32>(cpu::NumCores));
++        SynchronizeAllCoresImpl(&g_all_core_sync_count, static_cast<s32>(cpu::GetNumPresentCores()));
+     }
+ 
+ }
+diff --git a/libraries/libmesosphere/source/arch/arm64/kern_k_interrupt_manager.cpp b/libraries/libmesosphere/source/arch/arm64/kern_k_interrupt_manager.cpp
+index af8e607..9d13cd6 100644
+--- a/libraries/libmesosphere/source/arch/arm64/kern_k_interrupt_manager.cpp
++++ b/libraries/libmesosphere/source/arch/arm64/kern_k_interrupt_manager.cpp
+@@ -333,7 +333,7 @@ namespace ams::kern::arch::arm64 {
+     }
+ 
+     void KInterruptManager::UnbindGlobal(s32 irq) {
+-        for (size_t core_id = 0; core_id < cpu::NumCores; core_id++) {
++        for (size_t core_id = 0; core_id < cpu::GetNumPresentCores(); core_id++) {
+             m_interrupt_controller.ClearTarget(irq, static_cast<s32>(core_id));
+         }
+         m_interrupt_controller.SetPriorityLevel(irq, KInterruptController::PriorityLevel_Low);
+diff --git a/libraries/libmesosphere/source/kern_k_capabilities.cpp b/libraries/libmesosphere/source/kern_k_capabilities.cpp
+index ba03592..b547504 100644
+--- a/libraries/libmesosphere/source/kern_k_capabilities.cpp
++++ b/libraries/libmesosphere/source/kern_k_capabilities.cpp
+@@ -27,8 +27,14 @@ namespace ams::kern {
+         m_program_type            = 0;
+ 
+         /* Initial processes may run on all cores. */
++        #if defined(ATMOSPHERE_BOARD_GENERIC_AARCH64)
++        /* This board's core map is set at boot, so the physical mask is computed at run time. */
++        const u64 VirtMask = cpu::VirtualCoreMask;
++        const u64 PhysMask = cpu::ConvertVirtualCoreMaskToPhysical(VirtMask);
++        #else
+         constexpr u64 VirtMask = cpu::VirtualCoreMask;
+         constexpr u64 PhysMask = cpu::ConvertVirtualCoreMaskToPhysical(VirtMask);
++        #endif
+ 
+         m_core_mask      = VirtMask;
+         m_phys_core_mask = PhysMask;
+diff --git a/libraries/libmesosphere/source/kern_k_debug_base.cpp b/libraries/libmesosphere/source/kern_k_debug_base.cpp
+index 3e71fde..55d194d 100644
+--- a/libraries/libmesosphere/source/kern_k_debug_base.cpp
++++ b/libraries/libmesosphere/source/kern_k_debug_base.cpp
+@@ -364,6 +364,12 @@ namespace ams::kern {
+         constexpr u64 ThreadIdUnknownThread = -2ll;
+         uintptr_t debug_info_params[1 + cpu::NumCores] = { static_cast<uintptr_t>(ams::svc::DebugException_DebuggerBreak), };
+         for (size_t i = 0; i < cpu::NumCores; ++i) {
++            /* A core that is not present runs no thread. */
++            if (i >= cpu::GetNumPresentCores()) {
++                debug_info_params[1 + i] = ThreadIdNoThread;
++                continue;
++            }
++
+             /* Get the currently running thread. */
+             KThread *thread = target->GetRunningThread(i);
+ 
+@@ -466,7 +472,7 @@ namespace ams::kern {
+             /* If the thread's raw state isn't runnable, check if it's current on some core. */
+             if (thread->GetRawState() != KThread::ThreadState_Runnable) {
+                 bool current = false;
+-                for (auto i = 0; i < static_cast<s32>(cpu::NumCores); ++i) {
++                for (auto i = 0; i < static_cast<s32>(cpu::GetNumPresentCores()); ++i) {
+                     if (thread == Kernel::GetScheduler(i).GetSchedulerCurrentThread()) {
+                         current = true;
+                         break;
+@@ -529,7 +535,7 @@ namespace ams::kern {
+             /* If the thread's raw state isn't runnable, check if it's current on some core. */
+             if (thread->GetRawState() != KThread::ThreadState_Runnable) {
+                 bool current = false;
+-                for (auto i = 0; i < static_cast<s32>(cpu::NumCores); ++i) {
++                for (auto i = 0; i < static_cast<s32>(cpu::GetNumPresentCores()); ++i) {
+                     if (thread == Kernel::GetScheduler(i).GetSchedulerCurrentThread()) {
+                         current = true;
+                         break;
+diff --git a/libraries/libmesosphere/source/kern_k_dpc_manager.cpp b/libraries/libmesosphere/source/kern_k_dpc_manager.cpp
+index 2b11ec4..19154ee 100644
+--- a/libraries/libmesosphere/source/kern_k_dpc_manager.cpp
++++ b/libraries/libmesosphere/source/kern_k_dpc_manager.cpp
+@@ -51,7 +51,7 @@ namespace ams::kern {
+                         KScopedLightLock lk(s_lock);
+                         MESOSPHERE_ABORT_UNLESS(s_core_mask == 0);
+ 
+-                        for (auto core = 0; core < static_cast<s32>(cpu::NumCores); ++core) {
++                        for (auto core = 0; core < static_cast<s32>(cpu::GetNumPresentCores()); ++core) {
+                             SetRequest(core);
+                         }
+ 
+@@ -133,7 +133,7 @@ namespace ams::kern {
+                     /* Rotate the scheduler queue for each core. */
+                     KScopedSchedulerLock lk;
+ 
+-                    for (size_t core_id = 0; core_id < cpu::NumCores; core_id++) {
++                    for (size_t core_id = 0; core_id < cpu::GetNumPresentCores(); core_id++) {
+                         if (const s32 priority = g_preemption_priorities[core_id]; priority > DpcManagerThreadPriority) {
+                             KScheduler::RotateScheduledQueue(static_cast<s32>(core_id), priority);
+                         }
+@@ -157,7 +157,7 @@ namespace ams::kern {
+ 
+         /* Launch the new thread. */
+         g_preemption_priorities[core_id] = priority;
+-        if (core_id == cpu::NumCores - 1) {
++        if (core_id == static_cast<s32>(cpu::GetNumPresentCores()) - 1) {
+             MESOSPHERE_R_ABORT_UNLESS(KThread::InitializeKernelThread(new_thread, DpcManagerPreemptionThreadFunction, 0, DpcManagerThreadPriority, core_id));
+         } else {
+             MESOSPHERE_R_ABORT_UNLESS(KThread::InitializeKernelThread(new_thread, DpcManagerNormalThreadFunction,     0, DpcManagerThreadPriority, core_id));
+diff --git a/libraries/libmesosphere/source/kern_k_scheduler.cpp b/libraries/libmesosphere/source/kern_k_scheduler.cpp
+index e39eab8..6775719 100644
+--- a/libraries/libmesosphere/source/kern_k_scheduler.cpp
++++ b/libraries/libmesosphere/source/kern_k_scheduler.cpp
+@@ -118,7 +118,8 @@ namespace ams::kern {
+         auto &priority_queue = GetPriorityQueue();
+ 
+         /* We want to go over all cores, finding the highest priority thread and determining if scheduling is needed for that core. */
+-        for (size_t core_id = 0; core_id < cpu::NumCores; core_id++) {
++        /* Cores that are not present never have a thread, so they are skipped; that also keeps them out of idle_cores. */
++        for (size_t core_id = 0; core_id < cpu::GetNumPresentCores(); core_id++) {
+             KThread *top_thread = priority_queue.GetScheduledFront(core_id);
+             if (top_thread != nullptr) {
+                 /* We need to check if the thread's process has a pinned thread. */
+@@ -281,7 +282,7 @@ namespace ams::kern {
+ 
+     void KScheduler::ClearPreviousThread(KThread *thread) {
+         MESOSPHERE_ASSERT(IsSchedulerLockedByCurrentThread());
+-        for (size_t i = 0; i < cpu::NumCores; ++i) {
++        for (size_t i = 0; i < cpu::GetNumPresentCores(); ++i) {
+             /* Get an atomic reference to the core scheduler's previous thread. */
+             const util::AtomicRef<KThread *> prev_thread(Kernel::GetScheduler(static_cast<s32>(i)).m_state.prev_thread);
+ 
+diff --git a/libraries/libmesosphere/source/kern_k_thread.cpp b/libraries/libmesosphere/source/kern_k_thread.cpp
+index b2ec763..467dbf4 100644
+--- a/libraries/libmesosphere/source/kern_k_thread.cpp
++++ b/libraries/libmesosphere/source/kern_k_thread.cpp
+@@ -162,8 +162,15 @@ namespace ams::kern {
+         MESOSPHERE_ASSERT(0 <= virt_core && virt_core < static_cast<s32>(BITSIZEOF(u64)));
+ 
+         /* Convert the virtual core to a physical core. */
++        #if defined(ATMOSPHERE_BOARD_GENERIC_AARCH64)
++        /* Only userland's core numbers are virtual. The kernel creates its own threads (main, idle, */
++        /* and per-core helpers) on a physical core it names; on this board the map folds virtual */
++        /* cores onto fewer physical ones, so passing those through it would move them. */
++        const s32 phys_core = (type == ThreadType_User) ? cpu::VirtualToPhysicalCoreMap[virt_core] : virt_core;
++        #else
+         const s32 phys_core = cpu::VirtualToPhysicalCoreMap[virt_core];
+-        MESOSPHERE_ASSERT(0 <= phys_core && phys_core < static_cast<s32>(cpu::NumCores));
++        #endif
++        MESOSPHERE_ASSERT(0 <= phys_core && phys_core < static_cast<s32>(cpu::GetNumPresentCores()));
+ 
+         /* First, clear the TLS address. */
+         m_tls_address = Null<KProcessAddress>;
+@@ -525,7 +532,7 @@ namespace ams::kern {
+         /* Ensure that the thread is not executing on any core. */
+         if (m_parent != nullptr) {
+             /* Wait for the thread to not be current on any core. */
+-            for (size_t i = 0; i < cpu::NumCores; ++i) {
++            for (size_t i = 0; i < cpu::GetNumPresentCores(); ++i) {
+                 KThread *core_thread;
+                 do {
+                     core_thread = Kernel::GetScheduler(i).GetSchedulerCurrentThread();
+@@ -820,7 +827,7 @@ namespace ams::kern {
+                 /* Check if the thread is currently running. */
+                 bool thread_is_current = false;
+                 s32 thread_core;
+-                for (thread_core = 0; thread_core < static_cast<s32>(cpu::NumCores); ++thread_core) {
++                for (thread_core = 0; thread_core < static_cast<s32>(cpu::GetNumPresentCores()); ++thread_core) {
+                     if (Kernel::GetScheduler(thread_core).GetSchedulerCurrentThread() == this) {
+                         thread_is_current = true;
+                         break;
+@@ -1053,7 +1060,7 @@ namespace ams::kern {
+                 } else {
+                     /* Check if the thread is currently running. */
+                     /* If it is, we'll need to retry. */
+-                    for (auto i = 0; i < static_cast<s32>(cpu::NumCores); ++i) {
++                    for (auto i = 0; i < static_cast<s32>(cpu::GetNumPresentCores()); ++i) {
+                         if (Kernel::GetScheduler(i).GetSchedulerCurrentThread() == this) {
+                             thread_is_current = true;
+                             break;
+diff --git a/libraries/libmesosphere/source/kern_k_worker_task_manager.cpp b/libraries/libmesosphere/source/kern_k_worker_task_manager.cpp
+index b246c98..ec24d09 100644
+--- a/libraries/libmesosphere/source/kern_k_worker_task_manager.cpp
++++ b/libraries/libmesosphere/source/kern_k_worker_task_manager.cpp
+@@ -61,7 +61,7 @@ namespace ams::kern {
+         MESOSPHERE_ABORT_UNLESS(thread != nullptr);
+ 
+         /* Launch the new thread. */
+-        MESOSPHERE_R_ABORT_UNLESS(KThread::InitializeKernelThread(thread, ThreadFunction, reinterpret_cast<uintptr_t>(this), priority, cpu::NumCores - 1));
++        MESOSPHERE_R_ABORT_UNLESS(KThread::InitializeKernelThread(thread, ThreadFunction, reinterpret_cast<uintptr_t>(this), priority, cpu::GetNumPresentCores() - 1));
+ 
+         /* Register the new thread. */
+         KThread::Register(thread);
+diff --git a/libraries/libmesosphere/source/kern_main.cpp b/libraries/libmesosphere/source/kern_main.cpp
+index 160bb49..1cedd01 100644
+--- a/libraries/libmesosphere/source/kern_main.cpp
++++ b/libraries/libmesosphere/source/kern_main.cpp
+@@ -22,7 +22,7 @@ namespace ams::kern {
+         template<typename F>
+         ALWAYS_INLINE void DoOnEachCoreInOrder(s32 core_id, F f) {
+             cpu::SynchronizeAllCores();
+-            for (size_t i = 0; i < cpu::NumCores; i++) {
++            for (size_t i = 0; i < cpu::GetNumPresentCores(); i++) {
+                 if (static_cast<s32>(i) == core_id) {
+                     f();
+                 }
+diff --git a/libraries/libmesosphere/source/svc/kern_svc_info.cpp b/libraries/libmesosphere/source/svc/kern_svc_info.cpp
+index 8b51c7f..8df8538 100644
+--- a/libraries/libmesosphere/source/svc/kern_svc_info.cpp
++++ b/libraries/libmesosphere/source/svc/kern_svc_info.cpp
+@@ -232,7 +232,14 @@ namespace ams::kern::svc {
+                         KScopedDisableDispatch dd;
+ 
+                         /* Verify the requested core is valid. */
++                        #if defined(ATMOSPHERE_BOARD_GENERIC_AARCH64)
++                        /* The core is userland's (virtual) number, as svcGetCurrentProcessorNumber returns */
++                        /* it; on this board several can name the current physical core. With four cores */
++                        /* the map is the identity and this is the check below. */
++                        const bool core_valid = (info_subtype == static_cast<u64>(-1ul)) || (info_subtype < cpu::NumCores && cpu::VirtualToPhysicalCoreMap[info_subtype] == GetCurrentCoreId());
++                        #else
+                         const bool core_valid = (info_subtype == static_cast<u64>(-1ul)) || (info_subtype == static_cast<u64>(GetCurrentCoreId()));
++                        #endif
+                         R_UNLESS(core_valid, svc::ResultInvalidCombination());
+ 
+                         /* Get the idle tick count. */
+@@ -287,7 +294,7 @@ namespace ams::kern::svc {
+                             }
+                         } else {
+                             const s32 phys_core = cpu::VirtualToPhysicalCoreMap[info_subtype];
+-                            MESOSPHERE_ABORT_UNLESS(phys_core < static_cast<s32>(cpu::NumCores));
++                            MESOSPHERE_ABORT_UNLESS(phys_core < static_cast<s32>(cpu::GetNumPresentCores()));
+ 
+                             tick_count = thread->GetCpuTime(phys_core);
+                             if (GetCurrentThreadPointer() == thread.GetPointerUnsafe() && phys_core == GetCurrentCoreId()) {
+diff --git a/libraries/libmesosphere/source/svc/kern_svc_processor.cpp b/libraries/libmesosphere/source/svc/kern_svc_processor.cpp
+index 55d850c..481b9eb 100644
+--- a/libraries/libmesosphere/source/svc/kern_svc_processor.cpp
++++ b/libraries/libmesosphere/source/svc/kern_svc_processor.cpp
+@@ -22,6 +22,25 @@ namespace ams::kern::svc {
+     namespace {
+ 
+         int32_t GetCurrentProcessorNumber() {
++            #if defined(ATMOSPHERE_BOARD_GENERIC_AARCH64)
++            /* On this board several virtual cores can share one physical core (kern_cpu_map.hpp), so */
++            /* the physical core number is not an answer by itself. Return the lowest virtual core in */
++            /* the thread's affinity mask that maps to the core it is running on. With four cores the */
++            /* map is the identity and this gives the same answers as the code below. If the thread */
++            /* migrated while we looked, look again. */
++            while (true) {
++                const s32 current_phys_core = GetCurrentCoreId();
++                u64 v_affinity_mask = GetCurrentThread().GetVirtualAffinityMask();
++                while (v_affinity_mask != 0) {
++                    const s32 next_virt_core = static_cast<s32>(__builtin_ctzll(v_affinity_mask));
++                    if (current_phys_core == cpu::VirtualToPhysicalCoreMap[next_virt_core]) {
++                        return next_virt_core;
++                    }
++
++                    v_affinity_mask &= ~(1ul << next_virt_core);
++                }
++            }
++            #else
+             /* Setup variables to track affinity information. */
+             s32 current_phys_core;
+             u64 v_affinity_mask   = 0;
+@@ -47,6 +66,7 @@ namespace ams::kern::svc {
+                     v_affinity_mask &= ~(1ul << next_virt_core);
+                 } while (v_affinity_mask != 0);
+             }
++            #endif
+         }
+ 
+     }
+diff --git a/mesosphere/kernel/source/arch/arm64/init/kern_init_core.cpp b/mesosphere/kernel/source/arch/arm64/init/kern_init_core.cpp
+index e37780b..d1a3fb3 100644
+--- a/mesosphere/kernel/source/arch/arm64/init/kern_init_core.cpp
++++ b/mesosphere/kernel/source/arch/arm64/init/kern_init_core.cpp
+@@ -61,6 +61,45 @@ namespace ams::kern::init {
+ 
+         constexpr PageTableEntry KernelRwDataUncachedAttribute(PageTableEntry::Permission_KernelRW, PageTableEntry::PageAttribute_NormalMemoryNotCacheable, PageTableEntry::Shareable_InnerShareable, PageTableEntry::MappingFlag_Mapped);
+ 
++        #if defined(ATMOSPHERE_BOARD_GENERIC_AARCH64)
++        /* Set by core 0 once it has started every core it can and fixed the number present. */
++        /* The others wait for it in InvokeMain, before anything reads that number. */
++        constinit bool g_present_cores_known = false;
++
++        /* This board runs on however many cores the machine has, up to cpu::NumCores. */
++        void TurnOnAllCores() {
++            cpu::MultiprocessorAffinityRegisterAccessor mpidr;
++            const auto arg = mpidr.GetCpuOnArgument();
++            const auto current_core = mpidr.GetAff0();
++
++            /* Start cores 1, 2, ... in order, up to the number the firmware reports. Each target is */
++            /* the boot core's affinity with Aff0 replaced by the core's index, as on other boards. */
++            /* Cores must be numbered 0 to n - 1, so the first that fails to start ends the list: */
++            /* it and every later core are treated as absent. */
++            const s32 num_to_start = KSystemControl::Init::GetNumCoresToStart();
++            s32 num_present = 1;
++            for (s32 i = 0; i < num_to_start; i++) {
++                if (static_cast<s32>(current_core) != i) {
++                    if (!KSystemControl::Init::TryCpuOn(arg | i, g_init_arguments + i)) {
++                        break;
++                    }
++                    ++num_present;
++                }
++            }
++
++            /* Fix the number of cores and the userland core map, then let the started cores proceed. */
++            cpu::InitializePresentCores(num_present);
++            __atomic_store_n(std::addressof(g_present_cores_known), true, __ATOMIC_RELEASE);
++            cpu::DataSynchronizationBarrierInnerShareable();
++            __asm__ __volatile__("sev" ::: "memory");
++        }
++
++        void WaitForPresentCoresKnown() {
++            while (!__atomic_load_n(std::addressof(g_present_cores_known), __ATOMIC_ACQUIRE)) {
++                __asm__ __volatile__("wfe" ::: "memory");
++            }
++        }
++        #else
+         void TurnOnAllCores() {
+             cpu::MultiprocessorAffinityRegisterAccessor mpidr;
+             const auto arg = mpidr.GetCpuOnArgument();
+@@ -72,8 +111,14 @@ namespace ams::kern::init {
+                 }
+             }
+         }
++        #endif
+ 
+         void InvokeMain(u64 core_id) {
++            #if defined(ATMOSPHERE_BOARD_GENERIC_AARCH64)
++            /* Do not start until core 0 knows how many cores there are. */
++            WaitForPresentCoresKnown();
++            #endif
++
+             /* Clear cpacr_el1. */
+             cpu::SetCpacrEl1(0);
+             cpu::InstructionMemoryBarrier();

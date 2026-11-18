@@ -1,0 +1,26 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CompSciOrBust <54033033+CompSciOrBust@users.noreply.github.com>
+Date: Mon, 10 Nov 2026 00:00:00 +0000
+Subject: [PATCH] build_mesosphere: always emit INI1 header even with no KIPs
+
+The kernel expects a valid INI1 structure at the embedded-ini offset.
+When there are no KIPs the original code emitted an empty byte string,
+leaving no INI1 magic for the kernel to find.  Always write a minimal
+16-byte INI1 header (magic, size=0x10, num_kips=0, reserved=0).
+
+---
+diff --git a/mesosphere/build_mesosphere.py b/mesosphere/build_mesosphere.py
+index db9599763..148874ad6 100644
+--- a/mesosphere/build_mesosphere.py
++++ b/mesosphere/build_mesosphere.py
+@@ -49,7 +49,7 @@ def main(argc, argv):
+     if num_kips > 0:
+         embedded_ini_header = pk('<4sIII', b'INI1', len(embedded_kips) + 0x10, num_kips, 0)
+     else:
+-        embedded_ini_header = b''
++        embedded_ini_header = pk('<4sIII', b'INI1', 0x10, 0, 0)
+     embedded_ini_offset = align_up(kernel_end, 0x1000)
+     embedded_ini_end = embedded_ini_offset + len(embedded_ini_header) + len(embedded_kips)
+ 
+--
+2.43.0

@@ -1,0 +1,4 @@
+[submodule "vendor/atmosphere"]
+	path = vendor/atmosphere
+	url = https://github.com/Atmosphere-NX/Atmosphere.git
+	ignore = dirty

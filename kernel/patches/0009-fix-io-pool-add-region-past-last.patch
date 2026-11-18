@@ -1,0 +1,27 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CompSciOrBust <54033033+CompSciOrBust@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 00:00:00 +0000
+Subject: [PATCH] kern: fix null dereference in KIoPool::AddIoRegion
+
+When the new region's address is above every region already in the
+pool, nfind_key returns end() and the overlap check decrements it,
+dereferencing a null tree node.  Check against the last region in that
+case.  The Switch has a single PCIe window, so this path is not
+normally reached there.
+
+---
+diff --git a/libraries/libmesosphere/source/kern_k_io_pool.cpp b/libraries/libmesosphere/source/kern_k_io_pool.cpp
+--- a/libraries/libmesosphere/source/kern_k_io_pool.cpp
++++ b/libraries/libmesosphere/source/kern_k_io_pool.cpp
+@@ -126,8 +126,9 @@
+             /* There is no region with address >= the new region already in our tree, but we also need to check */
+             /* for a region with address < the new region already in our tree. */
+             if (lowest_after != m_io_region_tree.begin()) {
+-                auto highest_before = --lowest_after;
+-                R_UNLESS(!highest_before->Overlaps(new_region->GetAddress(), new_region->GetSize()), svc::ResultBusy());
++                /* When every existing region is below the new one, lowest_after is end(), which cannot be decremented. */
++                const KIoRegion &highest_before = (lowest_after != m_io_region_tree.end()) ? *(--lowest_after) : m_io_region_tree.back();
++                R_UNLESS(!highest_before.Overlaps(new_region->GetAddress(), new_region->GetSize()), svc::ResultBusy());
+             }
+         }
+ 

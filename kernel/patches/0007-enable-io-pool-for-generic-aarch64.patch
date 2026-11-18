@@ -1,0 +1,45 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CompSciOrBust <54033033+CompSciOrBust@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 00:00:00 +0000
+Subject: [PATCH] generic-aarch64: enable the I/O pool API
+
+Driver processes map PCI device memory with CreateIoPool, CreateIoRegion
+and MapIoRegion, as the Switch's PCIe driver does.  Select the board's
+IoPoolType and its table of allowed ranges, which the board fills from
+the boot parameters instead of hardcoding.
+
+---
+diff --git a/libraries/libmesosphere/source/kern_k_io_pool.cpp b/libraries/libmesosphere/source/kern_k_io_pool.cpp
+--- a/libraries/libmesosphere/source/kern_k_io_pool.cpp
++++ b/libraries/libmesosphere/source/kern_k_io_pool.cpp
+@@ -31,6 +31,10 @@
+ 
+             #include "board/nintendo/nx/kern_k_io_pool.board.nintendo_nx.inc"
+ 
++        #elif defined(ATMOSPHERE_BOARD_GENERIC_AARCH64)
++
++            #include "board/generic/aarch64/kern_k_io_pool.board.generic_aarch64.inc"
++
+         #elif defined(AMS_SVC_IO_POOL_NOT_SUPPORTED)
+ 
+             #include "kern_k_io_pool.unsupported.inc"
+diff --git a/libraries/libvapours/include/vapours/svc/svc_select_io_pool_type.hpp b/libraries/libvapours/include/vapours/svc/svc_select_io_pool_type.hpp
+--- a/libraries/libvapours/include/vapours/svc/svc_select_io_pool_type.hpp
++++ b/libraries/libvapours/include/vapours/svc/svc_select_io_pool_type.hpp
+@@ -27,6 +27,16 @@
+ 
+     }
+ 
++#elif defined(ATMOSPHERE_BOARD_GENERIC_AARCH64)
++
++    #include <vapours/svc/board/generic/aarch64/svc_io_pool_type.hpp>
++    namespace ams::svc {
++
++        using IoPoolType = ::ams::svc::board::generic::aarch64::IoPoolType;
++        using enum ::ams::svc::board::generic::aarch64::IoPoolType;
++
++    }
++
+ #else
+ 
+     #define AMS_SVC_IO_POOL_NOT_SUPPORTED

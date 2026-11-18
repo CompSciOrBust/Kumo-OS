@@ -1,0 +1,42 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CompSciOrBust <54033033+CompSciOrBust@users.noreply.github.com>
+Date: Mon, 9 Nov 2026 00:00:00 +0000
+Subject: [PATCH] kern_ldr: identity-map pre-kernel DRAM gap for boot params
+
+SetupDevicePhysicalMemoryRegions runs with the MMU on, so any fixed
+physical address it reads must be in the initial identity mapping.
+When MainMemoryAddress < kernel_load_base (e.g. UEFI places boot
+params at DRAM base 0x40000000 but loads the kernel at 0x40100000)
+the gap was not mapped, causing a silent infinite-loop on the first
+unmapped dereference.
+
+Map [MainMemoryAddress, base_address) identity before the kernel
+region whenever there is a gap.  On boards where MainMemoryAddress
+equals the load address (NX) the condition is false and nothing
+changes.
+---
+diff --git a/mesosphere/kernel_ldr/source/kern_init_loader.cpp b/mesosphere/kernel_ldr/source/kern_init_loader.cpp
+index 43979905c..fa8062f97 100644
+--- a/mesosphere/kernel_ldr/source/kern_init_loader.cpp
++++ b/mesosphere/kernel_ldr/source/kern_init_loader.cpp
+@@ -88,8 +88,19 @@ namespace ams::kern::init::loader {
+         }
+ 
+         void SetupInitialIdentityMapping(KInitialPageTable &init_pt, uintptr_t base_address, uintptr_t kernel_size, uintptr_t page_table_region, size_t page_table_region_size, KInitialPageAllocator &allocator, KernelSystemRegisters *sysregs) {
+-            /* Map in an RWX identity mapping for the kernel. */
+             constexpr PageTableEntry KernelRWXIdentityAttribute(PageTableEntry::Permission_KernelRWX, PageTableEntry::PageAttribute_NormalMemory, PageTableEntry::Shareable_InnerShareable, PageTableEntry::MappingFlag_Mapped);
++
++            /* If the board's MainMemoryAddress is below the kernel load address (e.g. UEFI places
++               boot params at the DRAM base but loads the kernel 1 MB higher), identity-map that
++               gap so SetupDevicePhysicalMemoryRegions can read the boot params after the MMU is on. */
++            {
++                const uintptr_t dram_base = GetInteger(ams::kern::MainMemoryAddress);
++                if (base_address > dram_base) {
++                    init_pt.Map(dram_base, base_address - dram_base, dram_base, KernelRWXIdentityAttribute, allocator, 0);
++                }
++            }
++
++            /* Map in an RWX identity mapping for the kernel. */
+             init_pt.Map(base_address, kernel_size, base_address, KernelRWXIdentityAttribute, allocator, 0);
+ 
+             /* Map in an RWX identity mapping for ourselves. */

@@ -1,0 +1,62 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CompSciOrBust <54033033+CompSciOrBust@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 00:00:00 +0000
+Subject: [PATCH] kern: accept device address spaces on boards without an SMMU
+
+The generic device page table failed every operation with
+NotImplemented.  spl creates a device address space for the Switch's
+security engine at start-up and aborts if that fails, so it could not
+run on a board with no SMMU.  Make the operations succeed and do
+nothing: with no SMMU, devices see physical addresses and there is
+nothing to map.
+
+---
+diff --git a/libraries/libmesosphere/include/mesosphere/board/generic/kern_k_device_page_table.hpp b/libraries/libmesosphere/include/mesosphere/board/generic/kern_k_device_page_table.hpp
+index 662708ce9..42b811391 100644
+--- a/libraries/libmesosphere/include/mesosphere/board/generic/kern_k_device_page_table.hpp
++++ b/libraries/libmesosphere/include/mesosphere/board/generic/kern_k_device_page_table.hpp
+@@ -23,35 +23,39 @@ namespace ams::kern::board::generic {
+ 
+     using KDeviceVirtualAddress = u64;
+ 
++    /* A board with no SMMU translates no device addresses: a device sees physical addresses. */
++    /* Creating, attaching and mapping succeed and do nothing, so that system modules which set */
++    /* up a device address space unconditionally (spl, for the Switch's security engine) start. */
++    /* A driver on such a board must not rely on the mapping; it has to use physical addresses. */
+     class KDevicePageTable {
+         public:
+             constexpr KDevicePageTable() { /* ... */ }
+ 
+             Result ALWAYS_INLINE Initialize(u64 space_address, u64 space_size) {
+                 MESOSPHERE_UNUSED(space_address, space_size);
+-                R_THROW(ams::kern::svc::ResultNotImplemented());
++                R_SUCCEED();
+             }
+ 
+             void ALWAYS_INLINE Finalize() { /* ... */ }
+ 
+             Result ALWAYS_INLINE Attach(ams::svc::DeviceName device_name, u64 space_address, u64 space_size) {
+                 MESOSPHERE_UNUSED(device_name, space_address, space_size);
+-                R_THROW(ams::kern::svc::ResultNotImplemented());
++                R_SUCCEED();
+             }
+ 
+             Result ALWAYS_INLINE Detach(ams::svc::DeviceName device_name) {
+                 MESOSPHERE_UNUSED(device_name);
+-                R_THROW(ams::kern::svc::ResultNotImplemented());
++                R_SUCCEED();
+             }
+ 
+             Result ALWAYS_INLINE Map(KProcessPageTable *page_table, KProcessAddress process_address, size_t size, KDeviceVirtualAddress device_address, ams::svc::MemoryPermission device_perm, bool is_aligned, bool is_io) {
+                 MESOSPHERE_UNUSED(page_table, process_address, size, device_address, device_perm, is_aligned, is_io);
+-                R_THROW(ams::kern::svc::ResultNotImplemented());
++                R_SUCCEED();
+             }
+ 
+             Result ALWAYS_INLINE Unmap(KProcessPageTable *page_table, KProcessAddress process_address, size_t size, KDeviceVirtualAddress device_address) {
+                 MESOSPHERE_UNUSED(page_table, process_address, size, device_address);
+-                R_THROW(ams::kern::svc::ResultNotImplemented());
++                R_SUCCEED();
+             }
+ 
+             void ALWAYS_INLINE Unmap(KDeviceVirtualAddress device_address, size_t size) {

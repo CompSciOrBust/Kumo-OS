@@ -1,0 +1,111 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CompSciOrBust <54033033+CompSciOrBust@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 00:00:00 +0000
+Subject: [PATCH] kern: present a 19.2 MHz counter to userland
+
+Programs built for the Switch read the CPU counter directly and assume it
+runs at 19.2 MHz: libnx compiles that rate into every program through
+inline header functions, and libstratosphere uses it too.  Patch 0012
+made the kernel's own time correct on other counter rates, but programs
+still measured time 3.26 times fast in QEMU and 1.30 times fast on
+Compute Engine T2A.  On the generic-aarch64 board, stop userland from
+reading the counter (CNTKCTL_EL1.EL0PCTEN = 0) and answer the trapped
+reads in the kernel: CNTPCT_EL0, CNTVCT_EL0 and their self-synchronised
+forms return the kernel's nominal tick, CNTFRQ_EL0 returns 19,200,000.
+A trapped read costs one exception round trip: 82 ns on T2A, the same as
+svcGetSystemTick.
+
+---
+diff --git a/libraries/libmesosphere/include/mesosphere/arch/arm64/kern_k_hardware_timer.hpp b/libraries/libmesosphere/include/mesosphere/arch/arm64/kern_k_hardware_timer.hpp
+index 942b593..43c2828 100644
+--- a/libraries/libmesosphere/include/mesosphere/arch/arm64/kern_k_hardware_timer.hpp
++++ b/libraries/libmesosphere/include/mesosphere/arch/arm64/kern_k_hardware_timer.hpp
+@@ -62,7 +62,14 @@ namespace ams::kern::arch::arm64 {
+             /* Hardware register accessors. */
+             static ALWAYS_INLINE void InitializeGlobalTimer() {
+                 /* Set kernel control. */
++                #if defined(ATMOSPHERE_BOARD_GENERIC_AARCH64)
++                /* Userland's reads of the counter and its frequency trap to the kernel, which answers */
++                /* them in nominal ticks (EmulateCounterRead in kern_exception_handlers.cpp), so that */
++                /* programs built for the Switch's 19.2 MHz counter measure time correctly. */
++                cpu::CounterTimerKernelControlRegisterAccessor(0).SetEl0PctEn(false).Store();
++                #else
+                 cpu::CounterTimerKernelControlRegisterAccessor(0).SetEl0PctEn(true).Store();
++                #endif
+ 
+                 /* Disable the physical timer. */
+                 cpu::CounterTimerPhysicalTimerControlRegisterAccessor(0).SetEnable(false).SetIMask(false).Store();
+diff --git a/libraries/libmesosphere/source/arch/arm64/kern_exception_handlers.cpp b/libraries/libmesosphere/source/arch/arm64/kern_exception_handlers.cpp
+index bfa6165..bfe0985 100644
+--- a/libraries/libmesosphere/source/arch/arm64/kern_exception_handlers.cpp
++++ b/libraries/libmesosphere/source/arch/arm64/kern_exception_handlers.cpp
+@@ -551,6 +551,53 @@ namespace ams::kern::arch::arm64 {
+         GetCurrentProcess().Exit(-1ll);
+     }
+ 
++    #if defined(ATMOSPHERE_BOARD_GENERIC_AARCH64)
++    namespace {
++
++        /* Userland's reads of the generic timer trap here (see KHardwareTimer::InitializeGlobalTimer). */
++        /* Answer them the way the Switch would: a 19.2 MHz counter. Returns false for any other */
++        /* trapped system instruction, which is then handled as before. */
++        bool EmulateCounterRead(KExceptionContext *context, u64 esr) {
++            /* ISS of a trapped MRS (EC 0x18): direction bit 0 (1 = read), CRm 4:1, Rt 9:5, CRn 13:10, */
++            /* Op1 16:14, Op2 19:17, Op0 21:20. The counter registers are S3_3_C14_C0_<op2>. */
++            const u32 iss = static_cast<u32>(esr & 0x1FFFFFF);
++            const bool is_read = (iss & 1) != 0;
++            const u32 crm = (iss >>  1) & 0xF;
++            const u32 rt  = (iss >>  5) & 0x1F;
++            const u32 crn = (iss >> 10) & 0xF;
++            const u32 op1 = (iss >> 14) & 0x7;
++            const u32 op2 = (iss >> 17) & 0x7;
++            const u32 op0 = (iss >> 20) & 0x3;
++            if (!is_read || op0 != 3 || op1 != 3 || crn != 14 || crm != 0) {
++                return false;
++            }
++
++            u64 value;
++            switch (op2) {
++                case 0: /* CNTFRQ_EL0 */
++                    value = static_cast<u64>(ams::svc::TicksPerSecond);
++                    break;
++                case 1: /* CNTPCT_EL0 */
++                case 2: /* CNTVCT_EL0: the kernel's time is the physical counter; userland gets the same value */
++                case 5: /* CNTPCTSS_EL0 */
++                case 6: /* CNTVCTSS_EL0 */
++                    value = static_cast<u64>(KHardwareTimer::GetTick());
++                    break;
++                default:
++                    return false;
++            }
++
++            /* Rt 31 is XZR: the value is discarded. */
++            if (rt != 31) {
++                context->x[rt] = value;
++            }
++            context->pc += 4;
++            return true;
++        }
++
++    }
++    #endif
++
+     /* NOTE: This function is called from ASM. */
+     void HandleException(KExceptionContext *context) {
+         MESOSPHERE_ASSERT(!KInterruptManager::AreInterruptsEnabled());
+@@ -558,6 +605,15 @@ namespace ams::kern::arch::arm64 {
+         /* Retrieve information about the exception. */
+         const bool is_user_mode = (context->psr & 0xF) == 0;
+         const u64 esr           = cpu::GetEsrEl1();
++        #if defined(ATMOSPHERE_BOARD_GENERIC_AARCH64)
++        /* A read of the counter: answer it and return to the program at once. This skips what the */
++        /* rest of this function does for a user exception (pinning, a pending termination, DPCs); */
++        /* those are dealt with at the thread's next entry to the kernel, a timer tick at the latest. */
++        if (is_user_mode && ((esr >> 26) & 0x3F) == EsrEc_SystemInstruction64 && (context->psr & 0x10) == 0 && EmulateCounterRead(context, esr)) {
++            return;
++        }
++        #endif
++
+         const u64 afsr0         = cpu::GetAfsr0El1();
+         const u64 afsr1         = cpu::GetAfsr1El1();
+         u64 far  = 0;

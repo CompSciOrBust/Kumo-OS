@@ -1,0 +1,29 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CompSciOrBust <54033033+CompSciOrBust@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 00:00:00 +0000
+Subject: [PATCH] generic-aarch64: use the CPU's physical address size
+
+TCR_EL1.IPS is hardcoded to 36 bits, which is all the Switch needs.  On
+the generic board PCI configuration space and device memory can be
+above 64 GB (QEMU virt puts the ECAM at 0x4010000000), and an access
+through a mapping of such an address faults.  Take the size from
+ID_AA64MMFR0_EL1.PARange instead, capped at 48 bits.
+
+---
+diff --git a/mesosphere/kernel_ldr/source/kern_init_loader.cpp b/mesosphere/kernel_ldr/source/kern_init_loader.cpp
+--- a/mesosphere/kernel_ldr/source/kern_init_loader.cpp
++++ b/mesosphere/kernel_ldr/source/kern_init_loader.cpp
+@@ -120,7 +120,13 @@
+             /* Setup MAIR_EL1, TCR_EL1. */
+             /* TODO: Define these bits properly elsewhere, document exactly what each bit set is doing .*/
+             constexpr u64 MairValue = 0x0000000044FF0400ul;
++            #if defined(ATMOSPHERE_BOARD_GENERIC_AARCH64)
++            /* The stock value limits physical addresses to 36 bits, as on the Switch. PCI device memory */
++            /* can sit above that, so use the size the CPU reports (ID_AA64MMFR0_EL1.PARange), up to 48 bits. */
++            const u64 TcrValue = (0x00000011B5193519ul & ~(UINT64_C(7) << 32)) | (std::min<u64>(cpu::GetIdAa64Mmfr0El1() & 0xF, 5) << 32);
++            #else
+             constexpr u64 TcrValue  = 0x00000011B5193519ul;
++            #endif
+             cpu::MemoryAccessIndirectionRegisterAccessor(MairValue).Store();
+             cpu::TranslationControlRegisterAccessor(TcrValue).Store();
+ 

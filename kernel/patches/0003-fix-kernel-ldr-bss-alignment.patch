@@ -1,0 +1,16 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] fix: move __bss_start__ inside .bss section so ALIGN(8) applies
+
+--- a/mesosphere/kernel_ldr/kernel_ldr.ld
++++ b/mesosphere/kernel_ldr/kernel_ldr.ld
+@@ -144,9 +144,9 @@ SECTIONS
+ 		SORT(CONSTRUCTORS)
+ 	} :krnlldr
+ 
+-	__bss_start__ = .;
+ 	.bss ALIGN(8) :
+ 	{
++		__bss_start__ = .;
+ 		*(.dynbss)
+ 		*(.bss .bss.* .gnu.linkonce.b.*)
+ 		*(COMMON)

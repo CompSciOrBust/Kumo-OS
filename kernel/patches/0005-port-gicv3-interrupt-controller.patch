@@ -1,0 +1,643 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CompSciOrBust <54033033+CompSciOrBust@users.noreply.github.com>
+Date: Mon, 10 Nov 2026 00:00:00 +0000
+Subject: [PATCH] gic: replace GICv2 CPU interface with GICv3 redistributor
+
+Replace the MMIO-mapped GicCpuInterface struct with a GicRedistributor
+covering both RD_base (0x0000) and SGI_base (+0x10000) frames.  All CPU
+interface accesses are rewritten to use ICC system-register accessors
+(IccWrite_SRE/PMR/IGRPEN1/etc.).  GICD_IROUTER replaces GICD_ITARGETSR
+for SPI routing, and SetGicMask now reads MPIDR_EL1 directly.
+
+---
+diff --git a/libraries/libmesosphere/include/mesosphere/arch/arm/kern_generic_interrupt_controller.hpp b/libraries/libmesosphere/include/mesosphere/arch/arm/kern_generic_interrupt_controller.hpp
+index a44c92218..c16cc1b2c 100644
+--- a/libraries/libmesosphere/include/mesosphere/arch/arm/kern_generic_interrupt_controller.hpp
++++ b/libraries/libmesosphere/include/mesosphere/arch/arm/kern_generic_interrupt_controller.hpp
+@@ -75,31 +75,78 @@ namespace ams::kern::arch::arm {
+     static_assert(util::is_pod<GicDistributor>::value);
+     static_assert(sizeof(GicDistributor) == 0x1000);
+ 
+-    struct GicCpuInterface {
+-        u32 ctlr;
+-        u32 pmr;
+-        u32 bpr;
+-        u32 iar;
+-        u32 eoir;
+-        u32 rpr;
+-        u32 hppir;
+-        u32 abpr;
+-        u32 aiar;
+-        u32 aeoir;
+-        u32 ahppir;
+-        u32 statusr;
+-        u32 reserved_30[4];
+-        u32 impldef_40[36];
+-        u32 apr[4];
+-        u32 nsapr[4];
+-        u32 reserved_f0[3];
+-        u32 iidr;
+-        u32 reserved_100[960];
+-        u32 dir;
+-        u32 _0x1004[1023];
++    /* GICv3 Redistributor - RD_base frame (0x0000) + SGI_base frame (+0x10000). */
++    struct GicRedistributor {
++        /* RD_base frame */
++        u32 ctlr;                           /* 0x0000 */
++        u32 iidr;                           /* 0x0004 */
++        u64 typer;                          /* 0x0008 */
++        u32 statusr;                        /* 0x0010 */
++        u32 waker;                          /* 0x0014 */
++        /* Pad from 0x0018 to 0x10000 (SGI_base frame start). */
++        u32 _pad_to_sgi[(0x10000 - 0x0018) / 4];
++        /* SGI_base frame */
++        u32 _sgi_pad0[0x80 / 4];            /* 0x10000-0x1007F */
++        u32 igroupr0;                        /* 0x10080 */
++        u32 _sgi_pad1[31];                   /* 0x10084-0x100FF */
++        u32 isenabler0;                      /* 0x10100 */
++        u32 _sgi_pad2[31];                   /* 0x10104-0x1017F */
++        u32 icenabler0;                      /* 0x10180 */
++        u32 _sgi_pad3[31];                   /* 0x10184-0x101FF */
++        u32 ispendr0;                        /* 0x10200 */
++        u32 _sgi_pad4[31];                   /* 0x10204-0x1027F */
++        u32 icpendr0;                        /* 0x10280 */
++        u32 _sgi_pad5[31];                   /* 0x10284-0x102FF */
++        u32 isactiver0;                      /* 0x10300 */
++        u32 _sgi_pad6[31];                   /* 0x10304-0x1037F */
++        u32 icactiver0;                      /* 0x10380 */
++        u32 _sgi_pad7[31];                   /* 0x10384-0x103FF */
++        union {
++            u8  bytes[32];
++            u32 words[8];
++        } ipriorityr;                        /* 0x10400-0x1041F */
++        u32 _sgi_pad8[0x7E0 / 4];            /* 0x10420-0x10BFF */
++        u32 icfgr[2];                        /* 0x10C00-0x10C07 */
++        u32 _sgi_pad9[0xF8 / 4];             /* 0x10C08-0x10CFF */
++        u32 igrpmodr0;                       /* 0x10D00 */
+     };
+-    static_assert(util::is_pod<GicCpuInterface>::value);
+-    static_assert(sizeof(GicCpuInterface) == 0x2000);
++    static_assert(util::is_pod<GicRedistributor>::value);
++    static_assert(offsetof(GicRedistributor, waker)      == 0x0014);
++    static_assert(offsetof(GicRedistributor, igroupr0)   == 0x10080);
++    static_assert(offsetof(GicRedistributor, isenabler0) == 0x10100);
++    static_assert(offsetof(GicRedistributor, icenabler0) == 0x10180);
++    static_assert(offsetof(GicRedistributor, icpendr0)   == 0x10280);
++    static_assert(offsetof(GicRedistributor, ipriorityr) == 0x10400);
++    static_assert(offsetof(GicRedistributor, icfgr)      == 0x10C00);
++    static_assert(offsetof(GicRedistributor, igrpmodr0)  == 0x10D00);
++
++    /* ICC system register accessors (GICv3 CPU interface via MSR/MRS). */
++    static ALWAYS_INLINE void IccWrite_SRE(u64 val) {
++        __asm__ __volatile__("msr S3_0_C12_C12_5, %0\nisb" :: "r"(val) : "memory");
++    }
++    static ALWAYS_INLINE void IccWrite_PMR(u64 val) {
++        __asm__ __volatile__("msr S3_0_C4_C6_0, %0" :: "r"(val) : "memory");
++    }
++    static ALWAYS_INLINE void IccWrite_BPR0(u64 val) {
++        __asm__ __volatile__("msr S3_0_C12_C8_3, %0" :: "r"(val) : "memory");
++    }
++    static ALWAYS_INLINE void IccWrite_CTLR(u64 val) {
++        __asm__ __volatile__("msr S3_0_C12_C12_4, %0" :: "r"(val) : "memory");
++    }
++    static ALWAYS_INLINE void IccWrite_IGRPEN1(u64 val) {
++        __asm__ __volatile__("msr S3_0_C12_C12_7, %0\nisb" :: "r"(val) : "memory");
++    }
++    static ALWAYS_INLINE void IccWrite_EOIR1(u64 val) {
++        __asm__ __volatile__("msr S3_0_C12_C12_1, %0" :: "r"(val) : "memory");
++    }
++    static ALWAYS_INLINE u64 IccRead_IAR1() {
++        u64 val;
++        __asm__ __volatile__("mrs %0, S3_0_C12_C12_0" : "=r"(val) :: "memory");
++        return val;
++    }
++    static ALWAYS_INLINE void IccWrite_SGI1R(u64 val) {
++        __asm__ __volatile__("msr S3_0_C12_C11_5, %0\nisb" :: "r"(val) : "memory");
++    }
+ 
+     struct KInterruptController {
+         NON_COPYABLE(KInterruptController);
+@@ -135,12 +182,20 @@ namespace ams::kern::arch::arm {
+                 PriorityLevel_Scheduler = 2,
+             };
+         private:
++            /* Stores MPIDR Aff0 value for each core (used for GICD_IROUTER and ICC_SGI1R). */
+             static constinit inline u32 s_mask[cpu::NumCores];
+         private:
+-            volatile GicDistributor  *m_gicd;
+-            volatile GicCpuInterface *m_gicc;
++            volatile GicDistributor   *m_gicd;
++            volatile GicRedistributor *m_gicr[cpu::NumCores];
++        private:
++            /* Returns the GICR for the calling core based on MPIDR Aff0. */
++            ALWAYS_INLINE volatile GicRedistributor *GetCurrentGicr() const {
++                u64 mpidr;
++                __asm__ __volatile__("mrs %0, mpidr_el1" : "=r"(mpidr));
++                return m_gicr[mpidr & 0xFF];
++            }
+         public:
+-            constexpr KInterruptController() : m_gicd(nullptr), m_gicc(nullptr) { /* ... */ }
++            constexpr KInterruptController() : m_gicd(nullptr), m_gicr{} { /* ... */ }
+ 
+             void Initialize(s32 core_id);
+             void Finalize(s32 core_id);
+@@ -151,7 +206,7 @@ namespace ams::kern::arch::arm {
+             void RestoreGlobal(const GlobalState *state) const;
+         public:
+             u32 GetIrq() const {
+-                return m_gicc->iar;
++                return static_cast<u32>(IccRead_IAR1());
+             }
+ 
+             static constexpr s32 ConvertRawIrq(u32 irq) {
+@@ -159,65 +214,105 @@ namespace ams::kern::arch::arm {
+             }
+ 
+             void Enable(s32 irq) const {
+-                m_gicd->isenabler[irq / BITSIZEOF(u32)] = (1u << (irq % BITSIZEOF(u32)));
++                if (IsLocal(irq)) {
++                    GetCurrentGicr()->isenabler0 = (1u << (irq % BITSIZEOF(u32)));
++                } else {
++                    m_gicd->isenabler[irq / BITSIZEOF(u32)] = (1u << (irq % BITSIZEOF(u32)));
++                }
+             }
+ 
+             void Disable(s32 irq) const {
+-                m_gicd->icenabler[irq / BITSIZEOF(u32)] = (1u << (irq % BITSIZEOF(u32)));
++                if (IsLocal(irq)) {
++                    GetCurrentGicr()->icenabler0 = (1u << (irq % BITSIZEOF(u32)));
++                } else {
++                    m_gicd->icenabler[irq / BITSIZEOF(u32)] = (1u << (irq % BITSIZEOF(u32)));
++                }
+             }
+ 
+             void Clear(s32 irq) const {
+-                m_gicd->icpendr[irq / BITSIZEOF(u32)] = (1u << (irq % BITSIZEOF(u32)));
++                if (IsLocal(irq)) {
++                    GetCurrentGicr()->icpendr0 = (1u << (irq % BITSIZEOF(u32)));
++                } else {
++                    m_gicd->icpendr[irq / BITSIZEOF(u32)] = (1u << (irq % BITSIZEOF(u32)));
++                }
+             }
+ 
+             void SetTarget(s32 irq, s32 core_id) const {
+-                m_gicd->itargetsr.bytes[irq] = m_gicd->itargetsr.bytes[irq] | GetGicMask(core_id);
++                if (IsGlobal(irq)) {
++                    volatile u64 *irouter = reinterpret_cast<volatile u64 *>(
++                        reinterpret_cast<uintptr_t>(m_gicd) + 0x6000 + static_cast<size_t>(irq) * 8);
++                    *irouter = static_cast<u64>(s_mask[core_id]);
++                }
+             }
+ 
+             void ClearTarget(s32 irq, s32 core_id) const {
+-                m_gicd->itargetsr.bytes[irq] = m_gicd->itargetsr.bytes[irq] & ~GetGicMask(core_id);
++                if (IsGlobal(irq)) {
++                    volatile u64 *irouter = reinterpret_cast<volatile u64 *>(
++                        reinterpret_cast<uintptr_t>(m_gicd) + 0x6000 + static_cast<size_t>(irq) * 8);
++                    *irouter = static_cast<u64>(s_mask[0]);
++                }
+             }
+ 
+             void SetPriorityLevel(s32 irq, s32 level) const {
+                 MESOSPHERE_ASSERT(PriorityLevel_High <= level && level <= PriorityLevel_Low);
+-                m_gicd->ipriorityr.bytes[irq] = ToGicPriorityValue(level);
++                if (IsLocal(irq)) {
++                    GetCurrentGicr()->ipriorityr.bytes[irq] = ToGicPriorityValue(level);
++                } else {
++                    m_gicd->ipriorityr.bytes[irq] = ToGicPriorityValue(level);
++                }
+             }
+ 
+             s32 GetPriorityLevel(s32 irq) const {
+-                return FromGicPriorityValue(m_gicd->ipriorityr.bytes[irq]);
++                if (IsLocal(irq)) {
++                    return FromGicPriorityValue(GetCurrentGicr()->ipriorityr.bytes[irq]);
++                } else {
++                    return FromGicPriorityValue(m_gicd->ipriorityr.bytes[irq]);
++                }
+             }
+ 
+             void SetPriorityLevel(s32 level) const {
+                 MESOSPHERE_ASSERT(PriorityLevel_High <= level && level <= PriorityLevel_Low);
+-                m_gicc->pmr = ToGicPriorityValue(level);
++                IccWrite_PMR(ToGicPriorityValue(level));
+             }
+ 
+             void SetEdge(s32 irq) const {
+-                u32 cfg = m_gicd->icfgr[irq / (BITSIZEOF(u32) / 2)];
+-                cfg &= ~(0x3 << (2 * (irq % (BITSIZEOF(u32) / 2))));
+-                cfg |=  (0x2 << (2 * (irq % (BITSIZEOF(u32) / 2))));
+-                m_gicd->icfgr[irq / (BITSIZEOF(u32) / 2)] = cfg;
++                if (IsLocal(irq)) {
++                    u32 cfg = GetCurrentGicr()->icfgr[irq / (BITSIZEOF(u32) / 2)];
++                    cfg &= ~(0x3u << (2 * (irq % (BITSIZEOF(u32) / 2))));
++                    cfg |=  (0x2u << (2 * (irq % (BITSIZEOF(u32) / 2))));
++                    GetCurrentGicr()->icfgr[irq / (BITSIZEOF(u32) / 2)] = cfg;
++                } else {
++                    u32 cfg = m_gicd->icfgr[irq / (BITSIZEOF(u32) / 2)];
++                    cfg &= ~(0x3u << (2 * (irq % (BITSIZEOF(u32) / 2))));
++                    cfg |=  (0x2u << (2 * (irq % (BITSIZEOF(u32) / 2))));
++                    m_gicd->icfgr[irq / (BITSIZEOF(u32) / 2)] = cfg;
++                }
+             }
+ 
+             void SetLevel(s32 irq) const {
+-                u32 cfg = m_gicd->icfgr[irq / (BITSIZEOF(u32) / 2)];
+-                cfg &= ~(0x3 << (2 * (irq % (BITSIZEOF(u32) / 2))));
+-                cfg |=  (0x0 << (2 * (irq % (BITSIZEOF(u32) / 2))));
+-                m_gicd->icfgr[irq / (BITSIZEOF(u32) / 2)] = cfg;
++                if (IsLocal(irq)) {
++                    u32 cfg = GetCurrentGicr()->icfgr[irq / (BITSIZEOF(u32) / 2)];
++                    cfg &= ~(0x3u << (2 * (irq % (BITSIZEOF(u32) / 2))));
++                    GetCurrentGicr()->icfgr[irq / (BITSIZEOF(u32) / 2)] = cfg;
++                } else {
++                    u32 cfg = m_gicd->icfgr[irq / (BITSIZEOF(u32) / 2)];
++                    cfg &= ~(0x3u << (2 * (irq % (BITSIZEOF(u32) / 2))));
++                    m_gicd->icfgr[irq / (BITSIZEOF(u32) / 2)] = cfg;
++                }
+             }
+ 
+             void SendInterProcessorInterrupt(s32 irq, u64 core_mask) {
+                 MESOSPHERE_ASSERT(IsSoftware(irq));
+-                m_gicd->sgir = GetCpuTargetListMask(irq, core_mask);
++                IccWrite_SGI1R((static_cast<u64>(irq) << 24) | (core_mask & 0xFFFF));
+             }
+ 
+             void SendInterProcessorInterrupt(s32 irq) {
+                 MESOSPHERE_ASSERT(IsSoftware(irq));
+-                m_gicd->sgir = GicDistributor::SgirTargetListFilter_Others | irq;
++                IccWrite_SGI1R((static_cast<u64>(irq) << 24) | (1ULL << 40));
+             }
+ 
+             void EndOfInterrupt(u32 irq) const {
+-                m_gicc->eoir = irq;
++                IccWrite_EOIR1(irq);
+             }
+ 
+             bool IsInterruptDefined(s32 irq) const {
+@@ -262,18 +357,14 @@ namespace ams::kern::arch::arm {
+                 return (priority >> PriorityShift) & (NumPriorityLevels - 1);
+             }
+ 
+-            static constexpr ALWAYS_INLINE s32 GetCpuTargetListMask(s32 irq, u64 core_mask) {
+-                MESOSPHERE_ASSERT(IsSoftware(irq));
+-                MESOSPHERE_ASSERT(core_mask < (1ul << cpu::NumCores));
+-                return GicDistributor::SgirTargetListFilter_CpuTargetList | irq | (static_cast<u16>(core_mask) << GicDistributor::SgirCpuTargetListShift);
+-            }
+-
+-            static ALWAYS_INLINE s32 GetGicMask(s32 core_id) {
++            static ALWAYS_INLINE u32 GetGicMask(s32 core_id) {
+                 return s_mask[core_id];
+             }
+ 
+-            ALWAYS_INLINE void SetGicMask(s32 core_id) const {
+-                s_mask[core_id] = m_gicd->itargetsr.bytes[0];
++            static ALWAYS_INLINE void SetGicMask(s32 core_id) {
++                u64 mpidr;
++                __asm__ __volatile__("mrs %0, mpidr_el1" : "=r"(mpidr));
++                s_mask[core_id] = static_cast<u32>(mpidr & 0xFF);
+             }
+ 
+             NOINLINE void SetupInterruptLines(s32 core_id) const;
+diff --git a/libraries/libmesosphere/include/mesosphere/arch/arm64/kern_k_interrupt_controller.hpp b/libraries/libmesosphere/include/mesosphere/arch/arm64/kern_k_interrupt_controller.hpp
+index 15ac18ea5..458f0b6f3 100644
+--- a/libraries/libmesosphere/include/mesosphere/arch/arm64/kern_k_interrupt_controller.hpp
++++ b/libraries/libmesosphere/include/mesosphere/arch/arm64/kern_k_interrupt_controller.hpp
+@@ -24,7 +24,7 @@
+     namespace ams::kern::arch::arm64 {
+ 
+         using ams::kern::arch::arm::GicDistributor;
+-        using ams::kern::arch::arm::GicCpuInterface;
++        using ams::kern::arch::arm::GicRedistributor;
+         using ams::kern::arch::arm::KInterruptController;
+ 
+     }
+diff --git a/libraries/libmesosphere/include/mesosphere/arch/arm64/kern_k_memory_region_device_types.inc b/libraries/libmesosphere/include/mesosphere/arch/arm64/kern_k_memory_region_device_types.inc
+index f2be3fae6..b8d146beb 100644
+--- a/libraries/libmesosphere/include/mesosphere/arch/arm64/kern_k_memory_region_device_types.inc
++++ b/libraries/libmesosphere/include/mesosphere/arch/arm64/kern_k_memory_region_device_types.inc
+@@ -23,3 +23,6 @@ constexpr inline const auto KMemoryRegionType_InterruptDistributor  = KMemoryReg
+ static_assert(KMemoryRegionType_Uart                 .GetValue() == (0x1D));
+ static_assert(KMemoryRegionType_InterruptCpuInterface.GetValue() == (0x2D | KMemoryRegionAttr_NoUserMap));
+ static_assert(KMemoryRegionType_InterruptDistributor .GetValue() == (0x4D | KMemoryRegionAttr_NoUserMap));
++
++/* GICv3 alias: redistributor occupies the same type-tree slot as the GICv2 CPU interface. */
++constexpr inline const auto KMemoryRegionType_InterruptRedistributor = KMemoryRegionType_InterruptCpuInterface;
+diff --git a/libraries/libmesosphere/source/arch/arm/kern_generic_interrupt_controller.inc b/libraries/libmesosphere/source/arch/arm/kern_generic_interrupt_controller.inc
+index e7f2eb4fa..c3a4a9c0f 100644
+--- a/libraries/libmesosphere/source/arch/arm/kern_generic_interrupt_controller.inc
++++ b/libraries/libmesosphere/source/arch/arm/kern_generic_interrupt_controller.inc
+@@ -18,192 +18,207 @@
+ namespace ams::kern::arch::arm {
+ 
+     void KInterruptController::SetupInterruptLines(s32 core_id) const {
+-        const size_t ITLines = (core_id == 0) ? 32 * ((m_gicd->typer & 0x1F) + 1) : NumLocalInterrupts;
++        auto *const gicr = m_gicr[core_id];
++        /* Configure SGIs/PPIs (IRQs 0-31) in the GICR for this core. */
++        gicr->icenabler0  = 0xFFFFFFFF;
++        gicr->icpendr0    = 0xFFFFFFFF;
++        gicr->icactiver0  = 0xFFFFFFFF;
++        /* All SGIs/PPIs in Group 1 Non-Secure. */
++        gicr->igroupr0    = 0xFFFFFFFF;
++        gicr->igrpmodr0   = 0x00000000;
+ 
+-        for (size_t i = 0; i < ITLines / 32; i++) {
+-            m_gicd->icenabler[i] = 0xFFFFFFFF;
+-            m_gicd->icpendr[i]   = 0xFFFFFFFF;
+-            m_gicd->icactiver[i] = 0xFFFFFFFF;
+-            m_gicd->igroupr[i]   = 0;
++        for (size_t i = 0; i < NumLocalInterrupts; ++i) {
++            gicr->ipriorityr.bytes[i] = 0xFF;
+         }
+-
+-        for (size_t i = 0; i < ITLines; i++) {
+-            m_gicd->ipriorityr.bytes[i] = 0xFF;
+-            m_gicd->itargetsr.bytes[i]  = 0x00;
++        for (size_t i = 0; i < 2; ++i) {
++            gicr->icfgr[i] = 0x00000000;
+         }
+ 
+-        for (size_t i = 0; i < ITLines / 16; i++) {
+-            m_gicd->icfgr[i] = 0x00000000;
++        /* Configure SPIs (IRQs 32+) in the GICD — only on core 0. */
++        if (core_id == 0) {
++            const size_t ITLines = 32 * ((m_gicd->typer & 0x1F) + 1);
++            const size_t spi_words = (ITLines - NumLocalInterrupts) / 32;
++            const size_t spi_start_word = NumLocalInterrupts / 32;
++
++            for (size_t i = 0; i < spi_words; ++i) {
++                m_gicd->icenabler[spi_start_word + i] = 0xFFFFFFFF;
++                m_gicd->icpendr  [spi_start_word + i] = 0xFFFFFFFF;
++                m_gicd->icactiver[spi_start_word + i] = 0xFFFFFFFF;
++                m_gicd->igroupr  [spi_start_word + i] = 0xFFFFFFFF;
++                m_gicd->igrpmodr [spi_start_word + i] = 0x00000000;
++            }
++            for (size_t i = NumLocalInterrupts; i < ITLines; ++i) {
++                m_gicd->ipriorityr.bytes[i] = 0xFF;
++            }
++            for (size_t i = NumLocalInterrupts / 16; i < ITLines / 16; ++i) {
++                m_gicd->icfgr[i] = 0x00000000;
++            }
++            /* Default-route all SPIs to core 0 (Aff0=0, IRM=0). */
++            for (size_t i = NumLocalInterrupts; i < ITLines; ++i) {
++                volatile u64 *irouter = reinterpret_cast<volatile u64 *>(
++                    reinterpret_cast<uintptr_t>(m_gicd) + 0x6000 + i * 8);
++                *irouter = 0;
++            }
+         }
+     }
+ 
+     void KInterruptController::Initialize(s32 core_id) {
+-        /* Setup pointers to ARM mmio. */
+-        m_gicd = GetPointer<volatile GicDistributor >(KMemoryLayout::GetDeviceVirtualAddress(KMemoryRegionType_InterruptDistributor));
+-        m_gicc = GetPointer<volatile GicCpuInterface>(KMemoryLayout::GetDeviceVirtualAddress(KMemoryRegionType_InterruptCpuInterface));
++        /* Obtain virtual addresses for GICD and this core's GICR frame. */
++        const KVirtualAddress gicd_va = KMemoryLayout::GetDeviceVirtualAddress(KMemoryRegionType_InterruptDistributor);
++        const KVirtualAddress gicr_va = KMemoryLayout::GetDeviceVirtualAddress(KMemoryRegionType_InterruptRedistributor);
++        m_gicd = GetPointer<volatile GicDistributor>(gicd_va);
++        /* Each core has a 0x20000-byte GICR frame (RD_base at +0, SGI_base at +0x10000). */
++        m_gicr[core_id] = GetPointer<volatile GicRedistributor>(gicr_va + static_cast<size_t>(core_id) * 0x20000);
++        auto *const gicr = m_gicr[core_id];
++
++        /* Enable System Register Interface (SRE) on this CPU. */
++        IccWrite_SRE(7);  /* SRE | DFB | DIB */
++
++        /* Disable Group 1 interrupts while configuring. */
++        IccWrite_IGRPEN1(0);
+ 
+-        /* Clear CTLRs. */
+-        m_gicc->ctlr = 0;
++        /* On core 0 only: disable GICD and enable ARE_NS + Group1NS. */
+         if (core_id == 0) {
+             m_gicd->ctlr = 0;
++            __asm__ __volatile__("dsb sy" ::: "memory");
++            /* EnableGrp1NS (bit 1) | ARE_NS (bit 5). */
++            m_gicd->ctlr = (1u << 1) | (1u << 5);
++            __asm__ __volatile__("dsb sy" ::: "memory");
+         }
+ 
+-        m_gicc->pmr = 0;
+-        m_gicc->bpr = 7;
++        /* Wake up the redistributor: clear ProcessorSleep and wait for ChildrenAsleep to clear. */
++        u32 waker = gicr->waker;
++        waker &= ~(1u << 1);
++        gicr->waker = waker;
++        while (gicr->waker & (1u << 2)) {
++            __asm__ __volatile__("yield" ::: "memory");
++        }
+ 
+-        /* Setup all interrupt lines. */
++        /* Setup interrupt lines. */
+         SetupInterruptLines(core_id);
+ 
+-        /* Set CTLRs. */
+-        if (core_id == 0) {
+-            m_gicd->ctlr = 1;
+-        }
+-        m_gicc->ctlr = 1;
+-
+-        /* Set the mask for this core. */
++        /* Store this core's affinity (MPIDR Aff0) for SGI routing. */
+         SetGicMask(core_id);
+ 
+-        /* Set the priority level. */
++        /* Set priority mask and binary point. */
++        IccWrite_BPR0(7);
++        IccWrite_CTLR(0);
+         SetPriorityLevel(PriorityLevel_Low);
++
++        /* Enable Group 1 Non-Secure interrupts. */
++        IccWrite_IGRPEN1(1);
+     }
+ 
+     void KInterruptController::Finalize(s32 core_id) {
+-        /* Clear CTLRs. */
+-        if (core_id == 0) {
+-            m_gicd->ctlr = 0;
+-        }
+-        m_gicc->ctlr = 0;
++        /* Disable Group 1 interrupts. */
++        IccWrite_IGRPEN1(0);
+ 
+-        /* Set the priority level. */
++        /* Set priority to highest (mask everything). */
+         SetPriorityLevel(PriorityLevel_High);
+ 
+-        /* Setup all interrupt lines. */
++        /* Reset interrupt lines. */
+         SetupInterruptLines(core_id);
+ 
+-        /* Clear pointers, if needed. */
+         if (core_id == 0) {
++            m_gicd->ctlr = 0;
++            __asm__ __volatile__("dsb sy" ::: "memory");
+             m_gicd = nullptr;
+-            m_gicc = nullptr;
+         }
++        m_gicr[core_id] = nullptr;
+     }
+ 
+     void KInterruptController::SaveCoreLocal(LocalState *state) const {
+-        /* Save isenabler. */
+-        for (size_t i = 0; i < util::size(state->isenabler); ++i) {
+-            constexpr size_t Offset = 0;
+-            state->isenabler[i] = m_gicd->isenabler[i + Offset];
+-            m_gicd->isenabler[i + Offset] = 0xFFFFFFFF;
+-        }
++        auto *const gicr = GetCurrentGicr();
++        /* Save and disable SGI/PPI enables. */
++        state->isenabler[0] = gicr->isenabler0;
++        gicr->icenabler0  = 0xFFFFFFFF;
+ 
+-        /* Save ipriorityr. */
++        /* Save SGI/PPI priorities. */
+         for (size_t i = 0; i < util::size(state->ipriorityr); ++i) {
+-            constexpr size_t Offset = 0;
+-            state->ipriorityr[i] = m_gicd->ipriorityr.words[i + Offset];
+-            m_gicd->ipriorityr.words[i + Offset] = 0xFFFFFFFF;
++            state->ipriorityr[i] = gicr->ipriorityr.words[i];
++            gicr->ipriorityr.words[i] = 0xFFFFFFFF;
+         }
+ 
+-        /* Save itargetsr. */
++        /* itargetsr is not used in GICv3. */
+         for (size_t i = 0; i < util::size(state->itargetsr); ++i) {
+-            constexpr size_t Offset = 0;
+-            state->itargetsr[i] = m_gicd->itargetsr.words[i + Offset];
++            state->itargetsr[i] = 0;
+         }
+ 
+-        /* Save icfgr. */
++        /* Save SGI/PPI config. */
+         for (size_t i = 0; i < util::size(state->icfgr); ++i) {
+-            constexpr size_t Offset = 0;
+-            state->icfgr[i] = m_gicd->icfgr[i + Offset];
++            state->icfgr[i] = gicr->icfgr[i];
+         }
+ 
+-        /* Save spendsgir. */
++        /* spendsgir is not used in GICv3. */
+         for (size_t i = 0; i < util::size(state->spendsgir); ++i) {
+-            state->spendsgir[i] = m_gicd->spendsgir[i];
++            state->spendsgir[i] = 0;
+         }
+     }
+ 
+     void KInterruptController::SaveGlobal(GlobalState *state) const {
+-        /* Save isenabler. */
++        const size_t spi_start_word = util::size(LocalState{}.isenabler);
++
++        /* Save and disable SPI enables. */
+         for (size_t i = 0; i < util::size(state->isenabler); ++i) {
+-            constexpr size_t Offset = util::size(LocalState{}.isenabler);
+-            state->isenabler[i] = m_gicd->isenabler[i + Offset];
+-            m_gicd->isenabler[i + Offset] = 0xFFFFFFFF;
++            state->isenabler[i] = m_gicd->isenabler[spi_start_word + i];
++            m_gicd->isenabler[spi_start_word + i] = 0xFFFFFFFF;
+         }
+ 
+-        /* Save ipriorityr. */
++        /* Save SPI priorities. */
+         for (size_t i = 0; i < util::size(state->ipriorityr); ++i) {
+             constexpr size_t Offset = util::size(LocalState{}.ipriorityr);
+-            state->ipriorityr[i] = m_gicd->ipriorityr.words[i + Offset];
+-            m_gicd->ipriorityr.words[i + Offset] = 0xFFFFFFFF;
++            state->ipriorityr[i] = m_gicd->ipriorityr.words[Offset + i];
++            m_gicd->ipriorityr.words[Offset + i] = 0xFFFFFFFF;
+         }
+ 
+-        /* Save itargetsr. */
++        /* itargetsr unused in GICv3. */
+         for (size_t i = 0; i < util::size(state->itargetsr); ++i) {
+-            constexpr size_t Offset = util::size(LocalState{}.itargetsr);
+-            state->itargetsr[i] = m_gicd->itargetsr.words[i + Offset];
++            state->itargetsr[i] = 0;
+         }
+ 
+-        /* Save icfgr. */
++        /* Save SPI config. */
+         for (size_t i = 0; i < util::size(state->icfgr); ++i) {
+             constexpr size_t Offset = util::size(LocalState{}.icfgr);
+-            state->icfgr[i] = m_gicd->icfgr[i + Offset];
++            state->icfgr[i] = m_gicd->icfgr[Offset + i];
+         }
+     }
+ 
+     void KInterruptController::RestoreCoreLocal(const LocalState *state) const {
+-        /* Restore ipriorityr. */
++        auto *const gicr = GetCurrentGicr();
++        /* Restore SGI/PPI priorities. */
+         for (size_t i = 0; i < util::size(state->ipriorityr); ++i) {
+-            constexpr size_t Offset = 0;
+-            m_gicd->ipriorityr.words[i + Offset] = state->ipriorityr[i];
++            gicr->ipriorityr.words[i] = state->ipriorityr[i];
+         }
+ 
+-        /* Restore itargetsr. */
+-        for (size_t i = 0; i < util::size(state->itargetsr); ++i) {
+-            constexpr size_t Offset = 0;
+-            m_gicd->itargetsr.words[i + Offset] = state->itargetsr[i];
+-        }
+-
+-        /* Restore icfgr. */
++        /* Restore SGI/PPI config. */
+         for (size_t i = 0; i < util::size(state->icfgr); ++i) {
+-            constexpr size_t Offset = 0;
+-            m_gicd->icfgr[i + Offset] = state->icfgr[i];
+-        }
+-
+-        /* Restore isenabler. */
+-        for (size_t i = 0; i < util::size(state->isenabler); ++i) {
+-            constexpr size_t Offset = 0;
+-            m_gicd->icenabler[i + Offset] = 0xFFFFFFFF;
+-            m_gicd->isenabler[i + Offset] = state->isenabler[i];
++            gicr->icfgr[i] = state->icfgr[i];
+         }
+ 
+-        /* Restore spendsgir. */
+-        for (size_t i = 0; i < util::size(state->spendsgir); ++i) {
+-            m_gicd->spendsgir[i] = state->spendsgir[i];
+-        }
++        /* Restore SGI/PPI enables. */
++        gicr->icenabler0  = 0xFFFFFFFF;
++        gicr->isenabler0  = state->isenabler[0];
+     }
+ 
+     void KInterruptController::RestoreGlobal(const GlobalState *state) const {
+-        /* Restore ipriorityr. */
++        const size_t spi_start_word = util::size(LocalState{}.isenabler);
++
++        /* Restore SPI priorities. */
+         for (size_t i = 0; i < util::size(state->ipriorityr); ++i) {
+             constexpr size_t Offset = util::size(LocalState{}.ipriorityr);
+-            m_gicd->ipriorityr.words[i + Offset] = state->ipriorityr[i];
+-        }
+-
+-        /* Restore itargetsr. */
+-        for (size_t i = 0; i < util::size(state->itargetsr); ++i) {
+-            constexpr size_t Offset = util::size(LocalState{}.itargetsr);
+-            m_gicd->itargetsr.words[i + Offset] = state->itargetsr[i];
++            m_gicd->ipriorityr.words[Offset + i] = state->ipriorityr[i];
+         }
+ 
+-        /* Restore icfgr. */
++        /* Restore SPI config. */
+         for (size_t i = 0; i < util::size(state->icfgr); ++i) {
+             constexpr size_t Offset = util::size(LocalState{}.icfgr);
+-            m_gicd->icfgr[i + Offset] = state->icfgr[i];
++            m_gicd->icfgr[Offset + i] = state->icfgr[i];
+         }
+ 
+-        /* Restore isenabler. */
++        /* Restore SPI enables. */
+         for (size_t i = 0; i < util::size(state->isenabler); ++i) {
+-            constexpr size_t Offset = util::size(LocalState{}.isenabler);
+-            m_gicd->icenabler[i + Offset] = 0xFFFFFFFF;
+-            m_gicd->isenabler[i + Offset] = state->isenabler[i];
++            m_gicd->icenabler[spi_start_word + i] = 0xFFFFFFFF;
++            m_gicd->isenabler[spi_start_word + i] = state->isenabler[i];
+         }
+     }
+ 
+--
+2.43.0

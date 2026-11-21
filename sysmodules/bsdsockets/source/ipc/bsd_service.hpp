@@ -51,7 +51,7 @@ namespace kumo::horizon::hznet::ipc {
             ::Result Write(HZNET_BSD_OUT, s32 fd, HZNET_BSD_IN buffer);
             ::Result Read(HZNET_BSD_OUT, s32 fd, HZNET_BSD_OUTBUF buffer);
             ::Result Close(HZNET_BSD_OUT, s32 fd);
-            ::Result DuplicateSocket(HZNET_BSD_OUT, s32 fd, u64 reserved);
+            ::Result DuplicateSocket(HZNET_BSD_OUT, s32 fd, u64 source_pid);
             ::Result RegisterClientShared(kumo::ipc::Out<s32> out_errno, LibraryConfigData config, const kumo::ipc::ClientProcessId &client_pid, u64 work_buffer_size);
 
             /* Not supported. Each answers "success, -1, EOPNOTSUPP", so a client gets an error it can handle */

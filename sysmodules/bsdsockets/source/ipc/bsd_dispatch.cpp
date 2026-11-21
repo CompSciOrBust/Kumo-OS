@@ -7,12 +7,13 @@ struct I1 { static constexpr size_t WireBytes = 4; s32 a; };
 struct I2 { static constexpr size_t WireBytes = 8; s32 a, b; };
 struct I3 { static constexpr size_t WireBytes = 12; s32 a, b, c; };
 struct Registration { static constexpr size_t WireBytes = 48; LibraryConfigData config; u64 pid; u64 size; };
-struct Duplicate { static constexpr size_t WireBytes = 16; s32 fd; u32 padding; u64 reserved; };
+struct Duplicate { static constexpr size_t WireBytes = 16; s32 fd; u32 padding; u64 source_pid; };
 struct Version { static constexpr size_t WireBytes = 16; u64 pid; u32 version; u32 padding; };
 struct Pair { static constexpr size_t WireBytes = 8; s32 value, error; };
 struct PairExtra { static constexpr size_t WireBytes = 12; s32 value, error; u32 extra; };
 struct PairExtra64 { static constexpr size_t WireBytes = 16; s32 value, error; u64 extra; };
 static_assert(sizeof(Registration) == 48 && sizeof(Duplicate) == 16 && sizeof(Version) == 16);
+static_assert(offsetof(Duplicate, source_pid) == 8);
 static_assert(sizeof(Pair) == 8 && sizeof(PairExtra) == 12 && sizeof(PairExtra64) == 16);
 static_assert(offsetof(Registration, pid) == 32 && offsetof(Registration, size) == 40);
 static_assert(offsetof(PairExtra64, extra) == 8 && offsetof(Version, version) == 8);
@@ -127,7 +128,7 @@ constexpr CommandTable Commands({
         }>(26, {}),
     MakeCommand<BsdService, Duplicate, Pair, 0, 0,
         [](BsdService &s, const Duplicate &x, Pair &o, Arguments<0, 0> &) -> Result {
-            return s.DuplicateSocket(kumo::ipc::Out<s32>(&o.value), kumo::ipc::Out<s32>(&o.error), x.fd, x.reserved);
+            return s.DuplicateSocket(kumo::ipc::Out<s32>(&o.value), kumo::ipc::Out<s32>(&o.error), x.fd, x.source_pid);
         }>(27, {}),
     MakeCommand<BsdService, Duplicate, Pair, 1, 1,
         [](BsdService &, const Duplicate &, Pair &o, Arguments<1, 1> &) -> Result {

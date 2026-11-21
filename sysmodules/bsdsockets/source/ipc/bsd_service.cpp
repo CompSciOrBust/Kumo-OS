@@ -11,6 +11,38 @@ namespace kumo::horizon::hznet::ipc {
         constexpr CallResult NotSupported = { -1, wire::Errno_EOPNOTSUPP };
         constexpr CallResult TooManyClients = { -1, wire::Errno_ENOMEM };
 
+        bool IsSslProcess(u64 pid) {
+            if (pid == 0) {
+                return false;
+            }
+
+            /* Skip the PM lookup for initial processes, which can call BSD before pm:info is ready.
+             * PM launches SSL from a program NCA installed on SYSTEM. */
+            u64 last_initial_pid = 0;
+            if (R_FAILED(svcGetSystemInfo(&last_initial_pid, SystemInfoType_InitialProcessIdRange,
+                                        INVALID_HANDLE, InitialProcessIdRangeInfo_Maximum)) || pid <= last_initial_pid) {
+                return false;
+            }
+
+            Service pm{};
+            if (R_FAILED(smGetService(&pm, "pm:info"))) {
+                return false;
+            }
+
+            /* Atmosphere pm:info GetProcessInfo returns ProgramLocation and OverrideStatus. */
+            constexpr u32 GetProcessInfo = 65002;
+            constexpr u64 SslProgramId = 0x0100000000000024;
+            struct {
+                NcmProgramLocation location;
+                u64 override_keys;
+                u64 override_flags;
+            } info{};
+            const Result result = serviceDispatchInOut(&pm, GetProcessInfo, pid, info);
+            serviceClose(&pm);
+            return R_SUCCEEDED(result) && info.location.program_id == SslProgramId
+                   && info.location.storageID == NcmStorageId_BuiltInSystem;
+        }
+
         /* fd_set as libnx (newlib) lays it out: a bit per descriptor, least significant bit first. */
         constexpr s32 SelectMaxDescriptors = 1024;
 
@@ -74,8 +106,8 @@ namespace kumo::horizon::hznet::ipc {
             KUMO_SUCCEED();
         }
 
-        ipc::RegisterClient(client, client_pid.GetValue());
-        out_errno.SetValue(0);
+        const bool registered = ipc::RegisterClient(client, client_pid.GetValue());
+        out_errno.SetValue(registered ? 0 : wire::Errno_EPERM);
         KUMO_SUCCEED();
     }
 
@@ -88,8 +120,8 @@ namespace kumo::horizon::hznet::ipc {
             KUMO_SUCCEED();
         }
 
-        ipc::RegisterClient(client, client_pid.GetValue());
-        out_errno.SetValue(0);
+        const bool registered = ipc::RegisterClient(client, client_pid.GetValue());
+        out_errno.SetValue(registered ? 0 : wire::Errno_EPERM);
         KUMO_SUCCEED();
     }
 
@@ -331,16 +363,25 @@ namespace kumo::horizon::hznet::ipc {
         HZNET_RETURN(socket::Close(client->m_table, fd));
     }
 
-    ::Result BsdService::DuplicateSocket(HZNET_BSD_OUT, s32 fd, u64 reserved) {
-        KUMO_UNUSED(reserved);
-
-        /* Reserved to bsd:s, as on the Switch. */
+    ::Result BsdService::DuplicateSocket(HZNET_BSD_OUT, s32 fd, u64 source_pid) {
         if (!m_is_system) {
             HZNET_RETURN((CallResult{ -1, wire::Errno_EPERM }));
         }
 
         HZNET_GET_CLIENT(client);
-        HZNET_RETURN(socket::Duplicate(client->m_table, fd));
+        const u64 caller_pid = GetClientProcessId(client);
+        if (source_pid == 0 || source_pid == caller_pid || !IsSslProcess(caller_pid)) {
+            HZNET_RETURN(socket::Duplicate(client->m_table, fd, client->m_table));
+        }
+
+        Client *source = AcquireClientByProcessId(source_pid);
+        if (source == nullptr) {
+            HZNET_RETURN((CallResult{ -1, wire::Errno_EBADF }));
+        }
+
+        const CallResult result = socket::Duplicate(source->m_table, fd, client->m_table);
+        ReleaseClient(source);
+        HZNET_RETURN(result);
     }
 
     /* ---- Not supported ---- */

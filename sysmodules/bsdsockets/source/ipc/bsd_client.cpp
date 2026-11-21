@@ -32,10 +32,43 @@ namespace kumo::horizon::hznet::ipc {
         return nullptr;
     }
 
-    void RegisterClient(Client *client, u64 process_id) {
+    bool RegisterClient(Client *client, u64 process_id) {
         std::scoped_lock lk(g_mutex);
+        if (client->m_registered) {
+            return client->m_process_id == process_id;
+        }
         client->m_process_id = process_id;
         client->m_registered = true;
+        return true;
+    }
+
+    u64 GetClientProcessId(Client *client) {
+        std::scoped_lock lk(g_mutex);
+        return client->m_registered ? client->m_process_id : 0;
+    }
+
+    Client *AcquireClientByProcessId(u64 process_id) {
+        std::scoped_lock lk(g_mutex);
+
+        Client *match = nullptr;
+        for (int i = 0; i < MaxClients; ++i) {
+            if (!g_client_allocated[i]) {
+                continue;
+            }
+            Client *client = g_client_storage[i].get();
+            if (!client->m_registered || client->m_process_id != process_id || client->m_reference_count == 0) {
+                continue;
+            }
+            /* A PID alone cannot distinguish independent registrations. */
+            if (match != nullptr) {
+                return nullptr;
+            }
+            match = client;
+        }
+        if (match != nullptr) {
+            ++match->m_reference_count;
+        }
+        return match;
     }
 
     Client *AcquireClientForMonitoring(u64 process_id) {
@@ -46,7 +79,7 @@ namespace kumo::horizon::hznet::ipc {
                 continue;
             }
             Client *client = g_client_storage[i].get();
-            if (client->m_registered && !client->m_monitored && client->m_process_id == process_id) {
+            if (client->m_registered && !client->m_monitored && client->m_process_id == process_id && client->m_reference_count > 0) {
                 client->m_monitored = true;
                 ++client->m_reference_count;
                 return client;

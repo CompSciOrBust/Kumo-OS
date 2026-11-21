@@ -46,7 +46,7 @@ namespace kumo::horizon::hznet::socket {
 
     CallResult Create(DescriptorTable &table, s32 domain, s32 type, s32 protocol);
     CallResult Close(DescriptorTable &table, s32 fd);
-    CallResult Duplicate(DescriptorTable &table, s32 fd);
+    CallResult Duplicate(DescriptorTable &source, s32 fd, DescriptorTable &destination);
 
     CallResult Bind(DescriptorTable &table, s32 fd, const void *address, size_t address_size);
     CallResult Connect(DescriptorTable &table, s32 fd, const void *address, size_t address_size);

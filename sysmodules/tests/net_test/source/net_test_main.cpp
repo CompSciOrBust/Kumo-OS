@@ -1180,6 +1180,15 @@ namespace {
             Check("bsd:s duplicates the requested descriptor", R_SUCCEEDED(rc) && first == 0 && second == 1 && duplicate >= 0 && out.error == 0, rc);
             if (serviceIsActive(std::addressof(session))) {
                 if (duplicate >= 0) serviceDispatchInOut(std::addressof(session), 26, duplicate, out);
+
+                const struct { s32 fd; u32 padding; u64 reserved; } in{second, 0, UINT64_MAX};
+                const Result reserved_rc = serviceDispatchInOut(std::addressof(session), 27, in, out);
+                Check("bsd:s preserves the reserved field for ordinary callers",
+                      R_SUCCEEDED(reserved_rc) && out.value == first && out.error == 0, out.error);
+                if (R_SUCCEEDED(reserved_rc) && out.value >= 0) {
+                    const s32 reserved_duplicate = out.value;
+                    serviceDispatchInOut(std::addressof(session), 26, reserved_duplicate, out);
+                }
                 if (second >= 0) serviceDispatchInOut(std::addressof(session), 26, second, out);
                 ::serviceClose(std::addressof(session));
             }

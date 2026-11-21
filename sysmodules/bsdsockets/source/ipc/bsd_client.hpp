@@ -32,7 +32,13 @@ namespace kumo::horizon::hznet::ipc {
     Client *CreateClient();
 
     /* Record the process that registered a client. */
-    void RegisterClient(Client *client, u64 process_id);
+    bool RegisterClient(Client *client, u64 process_id);
+
+    /* The kernel-provided PID recorded during registration, or zero before registration. */
+    u64 GetClientProcessId(Client *client);
+
+    /* Hold the sole registered client for a PID while using its descriptor table. */
+    Client *AcquireClientByProcessId(u64 process_id);
 
     /* The registered, not yet monitored client of a process, with a reference added; nullptr if none. */
     Client *AcquireClientForMonitoring(u64 process_id);

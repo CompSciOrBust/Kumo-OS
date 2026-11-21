@@ -961,20 +961,20 @@ namespace kumo::horizon::hznet::socket {
         return Ok();
     }
 
-    CallResult Duplicate(DescriptorTable &table, s32 fd) {
+    CallResult Duplicate(DescriptorTable &source, s32 fd, DescriptorTable &destination) {
         stack::ScopedLock lk;
 
-        Socket *socket = GetSocket(table, fd);
-        if (socket == nullptr) {
+        Socket *socket = GetSocket(source, fd);
+        if (socket == nullptr || destination.m_cancelled) {
             return Fail(Errno_EBADF);
         }
-        const s32 new_fd = FindFreeDescriptor(table);
+        const s32 new_fd = FindFreeDescriptor(destination);
         if (new_fd < 0) {
             return Fail(Errno_EMFILE);
         }
 
         ++socket->descriptor_count;
-        table.m_sockets[new_fd] = socket;
+        destination.m_sockets[new_fd] = socket;
         return Ok(new_fd);
     }
 

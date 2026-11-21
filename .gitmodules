@@ -2,3 +2,6 @@
 	path = vendor/atmosphere
 	url = https://github.com/Atmosphere-NX/Atmosphere.git
 	ignore = dirty
+[submodule "vendor/mbedtls"]
+	path = vendor/mbedtls
+	url = https://github.com/Mbed-TLS/mbedtls.git

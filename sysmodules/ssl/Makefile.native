@@ -1,0 +1,75 @@
+DEVKITPRO ?= /opt/devkitpro
+TOOLCHAIN := $(DEVKITPRO)/devkitA64/bin/aarch64-none-elf-
+CC := $(TOOLCHAIN)gcc
+CXX := $(TOOLCHAIN)g++
+HORIZON_MODULE_KIND := program
+VARIANT ?= release
+BUILD := build/native/$(VARIANT)
+OUT := out/nintendo_nx_arm64_armv8a/$(VARIANT)
+TARGET := $(OUT)/ssl
+
+CMAKE ?= cmake
+MBEDTLS_PYTHON ?= python3
+TLS_SOURCE := $(abspath ../../vendor/mbedtls)
+TLS_REVISION := $(shell git -C "$(TLS_SOURCE)" rev-parse --short HEAD 2>/dev/null)
+TLS_BUILD := $(abspath $(BUILD)/mbedtls-$(TLS_REVISION))
+TLS_CONFIG := $(abspath include)
+TLS_LIBS := $(TLS_BUILD)/library/libmbedtls.a $(TLS_BUILD)/library/libmbedx509.a \
+    $(TLS_BUILD)/tf-psa-crypto/core/libtfpsacrypto.a
+TLS_INCLUDES := -I$(TLS_SOURCE)/include -I$(TLS_SOURCE)/tf-psa-crypto/include \
+    -I$(TLS_SOURCE)/tf-psa-crypto/drivers/builtin/include -I$(TLS_BUILD)/library \
+    -I$(TLS_BUILD)/tf-psa-crypto/include -I$(TLS_CONFIG)
+TLS_FLAGS := -DMBEDTLS_USER_CONFIG_FILE=\"ssl_mbedtls_config.h\" \
+    -DTF_PSA_CRYPTO_USER_CONFIG_FILE=\"ssl_psa_config.h\"
+ARCH := -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft
+OPTIMIZATION := $(if $(filter release,$(VARIANT)),-O2,-Os)
+COMMON_FLAGS := $(ARCH) $(OPTIMIZATION) -g -fPIE -ffunction-sections -fdata-sections -D__SWITCH__ -D_GNU_SOURCE
+CXXFLAGS := $(COMMON_FLAGS) -I../common/include -I$(DEVKITPRO)/libnx/include $(TLS_INCLUDES) $(TLS_FLAGS) \
+    -Wall -Wextra -Werror -Wno-missing-field-initializers -std=gnu++23 -fno-rtti -fno-exceptions
+LDFLAGS := -specs=$(DEVKITPRO)/libnx/switch.specs $(ARCH) -fPIE -Wl,-z,relro,-z,now
+OBJECTS := $(BUILD)/ssl_main.o $(BUILD)/ssl_tls.o $(BUILD)/object_server.o $(BUILD)/object_workers.o
+
+.PHONY: all clean
+all: $(TARGET).nso $(TARGET).npdm
+
+$(TLS_BUILD)/mbedtls.stamp: $(wildcard include/*.h) Makefile.native
+	@test -f "$(TLS_SOURCE)/framework/CMakeLists.txt" && \
+		test -f "$(TLS_SOURCE)/tf-psa-crypto/framework/CMakeLists.txt" || \
+		{ echo "Initialize Mbed TLS with git submodule update --init --recursive -- vendor/mbedtls"; exit 1; }
+	@$(MBEDTLS_PYTHON) -c 'import jinja2, jsonschema' || \
+		{ echo "Install jinja2 and jsonschema for MBEDTLS_PYTHON=$(MBEDTLS_PYTHON)"; exit 1; }
+	$(CMAKE) -S "$(TLS_SOURCE)" -B "$(TLS_BUILD)" -G "Unix Makefiles" \
+		-DCMAKE_SYSTEM_NAME=Generic -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
+		-DCMAKE_C_COMPILER="$(CC)" \
+		-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
+		-DCMAKE_C_FLAGS="$(COMMON_FLAGS) -I$(TLS_CONFIG) -I$(DEVKITPRO)/libnx/include" \
+		-DPython3_EXECUTABLE="$(shell command -v $(MBEDTLS_PYTHON))" \
+		-DENABLE_PROGRAMS=OFF -DENABLE_TESTING=OFF -DDISABLE_PACKAGE_CONFIG_AND_INSTALL=ON \
+		-DMBEDTLS_USER_CONFIG_FILE="$(TLS_CONFIG)/ssl_mbedtls_config.h" \
+		-DTF_PSA_CRYPTO_USER_CONFIG_FILE="$(TLS_CONFIG)/ssl_psa_config.h"
+	$(MAKE) -C "$(TLS_BUILD)" mbedtls
+	touch $@
+
+$(BUILD)/%.o: source/%.cpp $(TLS_BUILD)/mbedtls.stamp
+	$(CXX) $(CXXFLAGS) -MMD -MP -c $< -o $@
+
+$(BUILD)/object_server.o: ../common/source/ipc/kumo_ipc_object_server.cpp $(TLS_BUILD)/mbedtls.stamp
+	$(CXX) $(CXXFLAGS) -MMD -MP -c $< -o $@
+
+$(BUILD)/object_workers.o: ../common/source/ipc/kumo_ipc_object_workers.cpp $(TLS_BUILD)/mbedtls.stamp
+	$(CXX) $(CXXFLAGS) -MMD -MP -c $< -o $@
+
+$(TARGET).elf: $(OBJECTS) $(TLS_BUILD)/mbedtls.stamp
+	@mkdir -p $(OUT)
+	$(CXX) $(LDFLAGS) $(OBJECTS) $(TLS_LIBS) -L$(DEVKITPRO)/libnx/lib -lnx -o $@
+
+$(TARGET).nso: $(TARGET).elf
+	$(DEVKITPRO)/tools/bin/elf2nso $< $@
+
+$(TARGET).npdm: ssl.json
+	@mkdir -p $(OUT)
+	$(DEVKITPRO)/tools/bin/npdmtool $< $@
+
+-include $(OBJECTS:.o=.d)
+clean:
+	rm -rf $(BUILD) $(OUT)

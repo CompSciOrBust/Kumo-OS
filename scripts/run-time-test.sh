@@ -11,7 +11,7 @@
 #                         answering on the host at 10.0.2.2:47123. psc must have
 #                         been built to ask there:
 #                           make -C sysmodules/psc clean
-#                           make -C sysmodules/psc nx_release ATMOSPHERE_CHECKED_LIBSTRATOSPHERE=1 KUMO_NTP_SERVERS="10.0.2.2:47123"
+#                           make -C sysmodules/psc -f Makefile.native out/nintendo_nx_arm64_armv8a/release/psc.kip KUMO_NTP_SERVERS="10.0.2.2:47123"
 #     none                no network device: the network checks are SKIPped.
 #
 # Runs sysmodules/tests/time_test against psc (the time core) and glue in QEMU
@@ -29,9 +29,9 @@
 #   make -C vendor/atmosphere/stratosphere/sm nx_release ATMOSPHERE_CHECKED_LIBSTRATOSPHERE=1
 #   make -C vendor/atmosphere/stratosphere/pm nx_release ATMOSPHERE_CHECKED_LIBSTRATOSPHERE=1
 #   make -C sysmodules/fs         nx_release ATMOSPHERE_CHECKED_LIBSTRATOSPHERE=1
-#   make -C sysmodules/bsdsockets nx_release ATMOSPHERE_CHECKED_LIBSTRATOSPHERE=1
-#   make -C sysmodules/psc        nx_release ATMOSPHERE_CHECKED_LIBSTRATOSPHERE=1
-#   make -C sysmodules/glue       nx_release ATMOSPHERE_CHECKED_LIBSTRATOSPHERE=1
+#   make -C sysmodules/bsdsockets -f Makefile.native out/nintendo_nx_arm64_armv8a/release/bsdsockets.kip
+#   make -C sysmodules/psc -f Makefile.native out/nintendo_nx_arm64_armv8a/release/psc.kip
+#   make -C sysmodules/glue -f Makefile.native out/nintendo_nx_arm64_armv8a/release/glue.kip
 #   make -C sysmodules/tests/time_test
 cd "$(dirname "$0")/.."
 

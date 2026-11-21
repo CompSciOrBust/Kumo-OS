@@ -16,7 +16,7 @@
 #   make bootloader && make kernel
 #   make -C vendor/atmosphere/stratosphere/sm nx_release ATMOSPHERE_CHECKED_LIBSTRATOSPHERE=1
 #   make -C vendor/atmosphere/stratosphere/pm nx_release ATMOSPHERE_CHECKED_LIBSTRATOSPHERE=1
-#   make -C sysmodules/psc               nx_release ATMOSPHERE_CHECKED_LIBSTRATOSPHERE=1
+#   make -C sysmodules/psc -f Makefile.native out/nintendo_nx_arm64_armv8a/release/psc.kip
 #   make -C sysmodules/tests/psc_test
 cd "$(dirname "$0")/.."
 

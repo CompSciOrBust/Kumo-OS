@@ -17,7 +17,7 @@
 #   make -C vendor/atmosphere/stratosphere/sm nx_release ATMOSPHERE_CHECKED_LIBSTRATOSPHERE=1
 #   make -C vendor/atmosphere/stratosphere/pm nx_release ATMOSPHERE_CHECKED_LIBSTRATOSPHERE=1
 #   make -C sysmodules/fs         nx_release ATMOSPHERE_CHECKED_LIBSTRATOSPHERE=1
-#   make -C sysmodules/bsdsockets nx_release ATMOSPHERE_CHECKED_LIBSTRATOSPHERE=1
+#   make -C sysmodules/bsdsockets -f Makefile.native out/nintendo_nx_arm64_armv8a/release/bsdsockets.kip
 #   make -C sysmodules/tests/net_test
 cd "$(dirname "$0")/.."
 

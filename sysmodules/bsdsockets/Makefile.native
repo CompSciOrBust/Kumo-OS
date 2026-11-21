@@ -5,6 +5,7 @@ export DEVKITPRO
 TOOLCHAIN := $(DEVKITPRO)/devkitA64/bin/aarch64-none-elf-
 CC := $(TOOLCHAIN)gcc
 CXX := $(TOOLCHAIN)g++
+HORIZON_MODULE_KIND := program
 ELF2KIP := $(DEVKITPRO)/tools/bin/elf2kip
 VARIANT ?= release
 BUILD := build/native/$(VARIANT)
@@ -26,7 +27,14 @@ LDFLAGS := -specs=$(DEVKITPRO)/libnx/switch.specs -fPIE -march=armv8-a+crc+crypt
     -mtp=soft -Wl,-Map,$(TARGET).map -Wl,-z,relro,-z,now
 
 .PHONY: all clean
-all: $(TARGET).kip
+all: $(TARGET).nso $(TARGET).npdm
+
+$(TARGET).nso: $(TARGET).elf
+	$(DEVKITPRO)/tools/bin/elf2nso $< $@
+
+$(TARGET).npdm: bsdsockets.program.json
+	@mkdir -p $(OUT)
+	$(DEVKITPRO)/tools/bin/npdmtool $< $@
 
 $(TARGET).kip: $(TARGET).elf bsdsockets.json
 	$(ELF2KIP) $< bsdsockets.json $@

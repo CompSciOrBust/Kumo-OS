@@ -9,7 +9,8 @@ nx_debug:
 nx_audit:
 	$(MAKE) -f Makefile.native VARIANT=audit
 native: nx_release
-install: nx_release
+install:
+	$(MAKE) -f Makefile.native VARIANT=release out/nintendo_nx_arm64_armv8a/release/bsdsockets.kip
 	cp out/nintendo_nx_arm64_armv8a/release/bsdsockets.kip ../../kips/bsdsockets.kip
 clean:
 	$(MAKE) -f Makefile.native VARIANT=release clean

@@ -22,6 +22,17 @@ typedef struct {
     unsigned char  Data4[8];
 } EFI_GUID;
 
+typedef struct EFI_RNG_PROTOCOL EFI_RNG_PROTOCOL;
+struct EFI_RNG_PROTOCOL {
+    EFI_STATUS (*GetInfo)(EFI_RNG_PROTOCOL *This, ULL *size, EFI_GUID *algorithms);
+    EFI_STATUS (*GetRNG)(EFI_RNG_PROTOCOL *This, EFI_GUID *algorithm, ULL size, unsigned char *output);
+};
+
+static const EFI_GUID EFI_RNG_PROTOCOL_GUID = {
+    0x3152bca5, 0xeade, 0x433d,
+    {0x86, 0x2e, 0xc0, 0x1c, 0xdc, 0x29, 0x1f, 0x44}
+};
+
 static const EFI_GUID FDT_GUID = {
     0xb1b621d5, 0xf19c, 0x41a5,
     {0x83, 0x0b, 0xd9, 0x15, 0x2c, 0x69, 0xaa, 0xe0}
@@ -129,7 +140,7 @@ typedef struct efi_boot_services_table
     // Library services
     void* ProtocolsPerHandle;
     EFI_STATUS (*LocateHandleBuffer)(unsigned int SearchType, EFI_GUID *Protocol, void *SearchKey, ULL *NoHandles, EFI_HANDLE **Buffer);
-    void* LocateProtocol;
+    EFI_STATUS (*LocateProtocol)(const EFI_GUID *Protocol, void *Registration, void **Interface);
     void* InstallMultipleProtocolInterfaces;
     void* UninstallMultipleProtocolInterfaces;
 

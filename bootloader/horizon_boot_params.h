@@ -3,6 +3,9 @@
 #define HORIZON_BOOT_PARAMS_MAGIC      0x48425030ULL  // "HBP0"
 #define HORIZON_BOOT_PARAMS_PHYS_ADDR  0x40000000ULL
 
+#define HORIZON_BOOT_RNG_SEED_MAGIC 0x48425030524e4731ULL  // "HBP0RNG1"
+#define HORIZON_BOOT_RNG_SEED_SIZE  32
+
 // PCI memory windows the kernel lets driver processes map, besides the ECAM itself.
 #define HORIZON_BOOT_PARAMS_MAX_PCI_MMIO  4
 
@@ -28,4 +31,9 @@ typedef struct {
     unsigned int       pci_mmio_count;    // valid entries in pci_mmio
     unsigned int       pmu_interrupt;     // PMU overflow interrupt from MADT; 0 = the firmware describes no PMU
     KBootPciMmioRange  pci_mmio[HORIZON_BOOT_PARAMS_MAX_PCI_MMIO];  // host bridge memory resources, from UEFI
+    unsigned long long rng_seed_magic;    // set only after EFI_RNG_PROTOCOL succeeds
+    unsigned char      rng_seed[HORIZON_BOOT_RNG_SEED_SIZE];
 } KBootParameters;
+
+_Static_assert(__builtin_offsetof(KBootParameters, rng_seed_magic) == 152, "boot RNG marker offset");
+_Static_assert(sizeof(KBootParameters) == 192, "boot parameter size");

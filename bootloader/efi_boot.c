@@ -207,6 +207,25 @@ static ULL detect_dram_size(EFI_BOOT_SERVICES *BS, EFI_TEXT_OUT *console) {
     return (end - base) & ~0xFFFFFULL;
 }
 
+static void collect_rng_seed(EFI_BOOT_SERVICES *BS, EFI_TEXT_OUT *console, KBootParameters *params) {
+    void *interface = 0;
+    params->rng_seed_magic = 0;
+    EFI_STATUS status = BS->LocateProtocol(&EFI_RNG_PROTOCOL_GUID, 0, &interface);
+    if (status == EFI_SUCCESS) {
+        EFI_RNG_PROTOCOL *rng = interface;
+        status = rng->GetRNG(rng, 0, sizeof(params->rng_seed), params->rng_seed);
+        if (status == EFI_SUCCESS) {
+            params->rng_seed_magic = HORIZON_BOOT_RNG_SEED_MAGIC;
+            return;
+        }
+    }
+
+    // Firmware can leave partial output on failure.
+    for (unsigned int i = 0; i < sizeof(params->rng_seed); ++i)
+        params->rng_seed[i] = 0;
+    print(console, "UEFI RNG unavailable; secure random SMC will be disabled\n");
+}
+
 static EFI_STATUS setup_boot_params(EFI_BOOT_SERVICES *BS, void *acpi,
                                      EFI_TEXT_OUT *console) {
     EFI_PHYSICAL_ADDRESS addr = HORIZON_BOOT_PARAMS_PHYS_ADDR;
@@ -235,6 +254,8 @@ static EFI_STATUS setup_boot_params(EFI_BOOT_SERVICES *BS, void *acpi,
         p->pci_mmio[i].base = 0;
         p->pci_mmio[i].size = 0;
     }
+
+    collect_rng_seed(BS, console, p);
 
     ACPI_RSDP *rsdp = (ACPI_RSDP *)acpi;
     void *xsdt = (void *)(ULL)rsdp->xsdt_address;

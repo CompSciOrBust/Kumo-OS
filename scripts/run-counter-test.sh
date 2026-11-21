@@ -54,6 +54,7 @@ scripts/hzdisk.py put "$WORK/boot.img" ESP "$WORK/root" / >/dev/null || exit 2
 LOG=$WORK/serial.log
 : > "$LOG"
 qemu-system-aarch64 \
+    -device virtio-rng-pci \
     -machine virt,gic-version=3 \
     -cpu "$CPU" \
     -smp "$SMP" \

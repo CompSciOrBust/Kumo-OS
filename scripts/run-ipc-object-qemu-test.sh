@@ -10,6 +10,7 @@ trap cleanup EXIT INT TERM
 make -C sysmodules/tests/ipc_object_test > "$WORK/module-build.log" 2>&1 || { cat "$WORK/module-build.log" >&2; exit 1; }
 python3 scripts/build-os.py configs/ipc-object-test.conf --no-kernel --no-modules --out "$WORK/image" > "$WORK/build.log" 2>&1
 qemu-system-aarch64 -machine virt,gic-version=3 -cpu cortex-a57 -smp 4 -m 4G \
+    -device virtio-rng-pci \
  -bios "$OVMF" \
  -drive "file=$WORK/image/disk.img,if=none,id=disk,format=raw" \
  -device nvme,drive=disk,serial=kumo-test -nic none -display none -serial "file:$WORK/serial.log" &

@@ -12,6 +12,9 @@ namespace ams::kern::board::generic::aarch64 {
 
     namespace {
 
+        constinit bool g_has_firmware_rng_seed = false;
+        constinit u8 g_firmware_rng_seed[BootRngSeedSize] = {};
+
         /* DRAM size reported by the bootloader, clamped to what the kernel is built for. */
         /* Falls back to MainMemorySize if the bootloader did not report one. */
         size_t GetBootMemorySize() {
@@ -107,7 +110,14 @@ namespace ams::kern::board::generic::aarch64 {
     }
 
     void KSystemControl::InitializePhase1() {
-        KSystemControlBase::InitializePhase1();
+        if (g_has_firmware_rng_seed) {
+            KTargetSystem::SetInitialized();
+            KSystemControlBase::InitializePhase1Base(g_firmware_rng_seed, sizeof(g_firmware_rng_seed));
+            crypto::ClearMemory(g_firmware_rng_seed, sizeof(g_firmware_rng_seed));
+        } else {
+            KSystemControlBase::InitializePhase1();
+        }
+        MESOSPHERE_LOG("Secure random SMC: %s\n", g_has_firmware_rng_seed ? "seeded by UEFI" : "disabled (no UEFI seed)");
 
         /* The hardware timer converts this rate to the nominal tick rate (kernel patch 0012), so */
         /* the line records what the kernel is scaling from. It is printed here because the timer */
@@ -142,6 +152,13 @@ namespace ams::kern::board::generic::aarch64 {
         /* implementation defined. */
         /* This runs from the kernel's constructors, while physical memory is still identity mapped. */
         const auto *p = reinterpret_cast<const KBootParameters *>(BootParamsPhysAddr);
+        if (p->magic == BootParamsMagic && p->rng_seed_magic == BootRngSeedMagic) {
+            std::memcpy(g_firmware_rng_seed, p->rng_seed, sizeof(g_firmware_rng_seed));
+            auto *boot_params = const_cast<KBootParameters *>(p);
+            crypto::ClearMemory(boot_params->rng_seed, sizeof(boot_params->rng_seed));
+            boot_params->rng_seed_magic = 0;
+            g_has_firmware_rng_seed = true;
+        }
         const bool firmware_has_pmu = p->magic == BootParamsMagic && p->pmu_interrupt != 0;
 
         const u64 pmu_version = (cpu::GetIdAa64Dfr0El1() >> 8) & 0xF;
@@ -351,8 +368,12 @@ namespace ams::kern::board::generic::aarch64 {
                         break;
                     }
 
-                    /* TODO: This is the kernel's own generator, which on this board is not seeded from */
-                    /* a hardware entropy source. Seed it from EFI_RNG_PROTOCOL through the boot parameters. */
+                    if (!g_has_firmware_rng_seed) {
+                        args->r[0] = SmcResult_NotImplemented;
+                        break;
+                    }
+
+                    /* SPL also relies on the existing 56-byte result register area. */
                     KSystemControl::GenerateRandom(std::addressof(args->r[1]), util::size(args->r) - 1);
                     args->r[0] = SmcResult_Success;
                 }

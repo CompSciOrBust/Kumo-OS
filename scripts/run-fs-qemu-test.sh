@@ -60,6 +60,7 @@ fi
 LOG=$WORK/serial.log
 : > "$LOG"
 qemu-system-aarch64 -machine virt,gic-version=3 -cpu cortex-a57 -smp 4 -m 4G \
+    -device virtio-rng-pci \
     -bios "$OVMF" -drive "file=$WORK/boot.img,format=raw,if=virtio" "$@" \
     -nic none -display none -serial "file:$LOG" &
 QEMU_PID=$!

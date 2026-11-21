@@ -7,6 +7,9 @@ namespace ams::kern::board::generic::aarch64 {
     constexpr inline uintptr_t BootParamsPhysAddr = 0x40000000ULL;
     constexpr inline u64       BootParamsMagic    = 0x48425030ULL;  /* "HBP0" */
 
+    constexpr inline u64 BootRngSeedMagic = 0x48425030524e4731ULL;
+    constexpr inline size_t BootRngSeedSize = 32;
+
     constexpr inline size_t MaxPciMmioRanges = 4;
 
     struct KBootPciMmioRange {
@@ -31,7 +34,12 @@ namespace ams::kern::board::generic::aarch64 {
         u32 pci_mmio_count;
         u32 pmu_interrupt;      /* PMU overflow interrupt from ACPI MADT; 0 = the firmware describes no PMU */
         KBootPciMmioRange pci_mmio[MaxPciMmioRanges];
+        u64 rng_seed_magic;
+        u8 rng_seed[BootRngSeedSize];
     };
+
+    static_assert(offsetof(KBootParameters, rng_seed_magic) == 152);
+    static_assert(sizeof(KBootParameters) == 192);
 
     /* The PCI host, copied out of the boot parameters during early init. */
     struct PciHostInfo {

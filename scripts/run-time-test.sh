@@ -105,6 +105,7 @@ LOG=$WORK/serial.log
 : > "$LOG"
 # shellcheck disable=SC2086
 qemu-system-aarch64 \
+    -device virtio-rng-pci \
     -machine virt,gic-version=3 \
     -cpu cortex-a57 \
     -smp "$SMP" \

@@ -36,6 +36,7 @@ fi
 
 # $NET_ARGS is left unquoted on purpose: it is several arguments.
 set -- qemu-system-aarch64 \
+    -device virtio-rng-pci \
     -machine "virt,gic-version=3${MACHINE:+,$MACHINE}" \
     -cpu "$CPU" \
     -smp "$SMP" \

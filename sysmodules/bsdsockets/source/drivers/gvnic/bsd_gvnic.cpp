@@ -24,6 +24,7 @@
  *
  * Rings and buffers come from the drivers' shared DMA arena.
  */
+#include <atomic>
 #include <kumo/prelude.hpp>
 #include <kumo/scope_exit.hpp>
 #include <kumo/dma.hpp>
@@ -65,17 +66,20 @@ namespace kumo::horizon::hznet::drivers::gvnic {
         /* command 2 seconds; the device answers this driver's at once (docs/bsdsockets.md). */
         constexpr u64      TimeoutSeconds = 5;
         constexpr s64 PollIntervalNs = 100'000;
-        constexpr int      PollAttempts   = TimeoutSeconds * 10'000;
+        constexpr u64 RecoveryDelayNs = 1'000'000'000;
+        constexpr u32 ResetStatus = abi::DeviceStatus_ResetRequested | abi::DeviceStatus_IsReset;
 
         /* Poll `done` until it returns true or the timeout passes. */
         template<typename F>
         bool WaitFor(F done) {
-            for (int i = 0; i < PollAttempts; ++i) {
+            const u64 start = ::armGetSystemTick();
+            const u64 timeout = TimeoutSeconds * ::armGetSystemTickFreq();
+            do {
                 if (done()) {
                     return true;
                 }
                 ::svcSleepThread(PollIntervalNs);
-            }
+            } while (::armGetSystemTick() - start < timeout);
             return done();
         }
 
@@ -94,7 +98,7 @@ namespace kumo::horizon::hznet::drivers::gvnic {
         /* was allocated then, so that a retry does not run the arena out. */
         ::Result AllocateOnce(kumo::dma::Buffer *buffer, size_t size, size_t alignment = PageSize) {
             if (buffer->IsValid()) {
-                KUMO_ABORT_UNLESS(buffer->size == size);
+                KUMO_UNLESS(buffer->size == size, KERNELRESULT(InvalidSize));
                 std::memset(buffer->address, 0, buffer->size);
                 KUMO_SUCCEED();
             }
@@ -108,6 +112,8 @@ namespace kumo::horizon::hznet::drivers::gvnic {
                 uintptr_t m_registers;
                 uintptr_t m_doorbells;
                 size_t m_doorbells_size;
+                std::atomic<bool> m_ready{false};
+                u64 m_recovery_started = 0;
 
                 /* Admin queue, and pages the admin commands point the device at. */
                 kumo::dma::Buffer m_admin_queue;
@@ -169,6 +175,7 @@ namespace kumo::horizon::hznet::drivers::gvnic {
                 virtual bool IsLinkUp() override;
                 virtual ::Result Send(const netdev::FramePiece *pieces, size_t piece_count) override;
                 virtual int Poll(netdev::IFrameReceiver *receiver) override;
+                virtual void Maintain() override;
             private:
                 u32 ReadRegister(u32 offset) const { return Be32(*reinterpret_cast<const volatile u32 *>(m_registers + offset)); }
                 void WriteRegister(u32 offset, u32 value) { *reinterpret_cast<volatile u32 *>(m_registers + offset) = Be32(value); }
@@ -257,7 +264,17 @@ namespace kumo::horizon::hznet::drivers::gvnic {
             MemoryBarrier();
             this->WriteRegister(abi::Register_AdminQueueDoorbell, m_admin_produced);
 
-            if (!WaitFor([&] { return this->ReadRegister(abi::Register_AdminQueueCounter) == m_admin_produced; })) {
+            const bool finished = WaitFor([&] {
+                /* The first command follows RUN immediately. Let the device finish leaving reset. */
+                return (m_admin_produced > 1 && (this->ReadRegister(abi::Register_DeviceStatus) & ResetStatus) != 0) ||
+                       this->ReadRegister(abi::Register_AdminQueueCounter) == m_admin_produced;
+            });
+            const u32 device_status = this->ReadRegister(abi::Register_DeviceStatus);
+            if ((device_status & ResetStatus) != 0) {
+                Log("[bsdsockets] gvnic: reset during admin command 0x%x (device status 0x%x)\n", static_cast<unsigned>(opcode), device_status);
+                KUMO_THROW(KERNELRESULT(InvalidState));
+            }
+            if (!finished) {
                 Log("[bsdsockets] gvnic: admin command 0x%x timed out after %llu s (completed %u of %u, device status 0x%x, driver status 0x%x)\n",
                     static_cast<unsigned>(opcode), static_cast<unsigned long long>(TimeoutSeconds), this->ReadRegister(abi::Register_AdminQueueCounter), m_admin_produced,
                     this->ReadRegister(abi::Register_DeviceStatus), this->ReadRegister(abi::Register_DriverStatus));
@@ -274,6 +291,7 @@ namespace kumo::horizon::hznet::drivers::gvnic {
         }
 
         ::Result GvnicDevice::DescribeDevice() {
+            m_options_seen = 0;
             KUMO_TRY(AllocateOnce(std::addressof(m_descriptor_page), PageSize));
             const kumo::dma::Buffer &page = m_descriptor_page;
 
@@ -476,10 +494,8 @@ namespace kumo::horizon::hznet::drivers::gvnic {
                 Log("[bsdsockets] gvnic: MSI-X enabled and masked, %u vectors\n", (control & 0x7FF) + 1u);
             }
 
-            /* The device has been seen to reset itself during setup, intermittently (docs/bsdsockets.md). */
-            /* Set it up again once if that happens, saying so, so that a passing fault and a persistent */
-            /* one can be told apart on the log. */
-            constexpr int SetupAttempts = 2;
+            /* Allow transient device resets during setup to settle before rebuilding the queues. */
+            constexpr int SetupAttempts = 3;
             ::Result rc = 0;
             for (int attempt = 1; attempt <= SetupAttempts; ++attempt) {
                 rc = this->BringUp();
@@ -487,8 +503,12 @@ namespace kumo::horizon::hznet::drivers::gvnic {
                     break;
                 }
                 Log("[bsdsockets] gvnic: setup attempt %d of %d failed (rc=0x%x, device status 0x%x)\n", attempt, SetupAttempts, rc, this->ReadRegister(abi::Register_DeviceStatus));
+                if (attempt < SetupAttempts) {
+                    ::svcSleepThread(RecoveryDelayNs);
+                }
             }
             KUMO_TRY(rc);
+            m_ready.store(true, std::memory_order_release);
 
             Log("[bsdsockets] gvnic: %02x:%02x.%x revision %u, queue format GQI-QPL, %u (rx) and %u (tx) buffers, link %s\n",
                 m_location.bus, m_location.device, m_location.function, m_revision, m_rx_buffer_count, m_tx_buffer_count, this->IsLinkUp() ? "up" : "down");
@@ -520,14 +540,35 @@ namespace kumo::horizon::hznet::drivers::gvnic {
             KUMO_TRY(this->RegisterPageList(RxQueuePageListId, std::addressof(m_rx_page_list), m_rx_buffers));
             KUMO_TRY(this->CreateTxQueue());
             KUMO_TRY(this->CreateRxQueue());
+            KUMO_UNLESS((this->ReadRegister(abi::Register_DeviceStatus) & ResetStatus) == 0, KERNELRESULT(InvalidState));
 
             release_guard.Cancel();
             KUMO_SUCCEED();
         }
 
         bool GvnicDevice::IsLinkUp() {
+            if (!m_ready.load(std::memory_order_acquire)) {
+                return false;
+            }
             const u32 status = this->ReadRegister(abi::Register_DeviceStatus);
-            return (status & abi::DeviceStatus_LinkUp) != 0;
+            return (status & (ResetStatus | abi::DeviceStatus_LinkUp)) == abi::DeviceStatus_LinkUp;
+        }
+
+        void GvnicDevice::Maintain() {
+            if (m_ready.load(std::memory_order_acquire) ||
+                ::armGetSystemTick() - m_recovery_started < ::armGetSystemTickFreq()) {
+                return;
+            }
+
+            /* Poll has stopped frame I/O, so setup can sleep without holding the stack lock. */
+            const ::Result rc = this->BringUp();
+            if (::kumo::IsSuccess(rc)) {
+                Log("[bsdsockets] gvnic: recovered from device reset\n");
+                m_ready.store(true, std::memory_order_release);
+            } else {
+                Log("[bsdsockets] gvnic: reset recovery failed (rc=0x%x, device status 0x%x)\n", rc, this->ReadRegister(abi::Register_DeviceStatus));
+                m_recovery_started = ::armGetSystemTick();
+            }
         }
 
         void GvnicDevice::ReclaimTransmitted() {
@@ -539,6 +580,7 @@ namespace kumo::horizon::hznet::drivers::gvnic {
         }
 
         ::Result GvnicDevice::Send(const netdev::FramePiece *pieces, size_t piece_count) {
+            KUMO_UNLESS(this->IsLinkUp(), KERNELRESULT(InvalidState));
             const size_t size = netdev::GetFrameSize(pieces, piece_count);
             KUMO_UNLESS(0 < size && size <= netdev::MaxFrameSize, KERNELRESULT(InvalidSize));
 
@@ -576,6 +618,15 @@ namespace kumo::horizon::hznet::drivers::gvnic {
         }
 
         int GvnicDevice::Poll(netdev::IFrameReceiver *receiver) {
+            if (!m_ready.load(std::memory_order_acquire)) {
+                return 0;
+            }
+            if (const u32 status = this->ReadRegister(abi::Register_DeviceStatus); (status & ResetStatus) != 0) {
+                m_ready.store(false, std::memory_order_release);
+                m_recovery_started = ::armGetSystemTick();
+                Log("[bsdsockets] gvnic: device reset detected (device status 0x%x)\n", status);
+                return 0;
+            }
             this->ReclaimTransmitted();
 
             int delivered = 0;

@@ -212,6 +212,10 @@ namespace kumo::horizon::hznet::stack {
                     }
                 }
 
+                for (int i = 0; i < g_interface_count; ++i) {
+                    g_interfaces[i]->m_device->Maintain();
+                }
+
                 /* While there is traffic, keep going; otherwise sleep until the next tick or a kick. */
                 if (work == 0) {
                     ::eventWait(&g_kick_event, static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(IdlePollInterval).count()));
@@ -316,12 +320,15 @@ namespace kumo::horizon::hznet::stack {
             netif_set_addr(netif, IP4_ADDR_ANY4, IP4_ADDR_ANY4, IP4_ADDR_ANY4);
         }
 
-        interface->m_configured = true;
+        interface->m_configured = false;
         interface->m_use_dhcp   = config.use_dhcp;
 
         if (config.use_dhcp) {
             netif_set_up(netif);
-            KUMO_UNLESS(dhcp_start(netif) == ERR_OK, KERNELRESULT(ResourceExhausted));
+            if (dhcp_start(netif) != ERR_OK) {
+                netif_set_down(netif);
+                KUMO_THROW(KERNELRESULT(ResourceExhausted));
+            }
         } else {
             ip4_addr_t address, netmask, gateway;
             ip4_addr_set_u32(std::addressof(address), config.address);
@@ -337,6 +344,7 @@ namespace kumo::horizon::hznet::stack {
             netif_set_up(netif);
         }
 
+        interface->m_configured = true;
         KUMO_SUCCEED();
     }
 

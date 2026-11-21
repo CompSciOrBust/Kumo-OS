@@ -4,8 +4,7 @@
  * (virtio-net, gVNIC, ENA, ...) carries the frames.
  *
  * Devices are polled: the kernel has no MSI/MSI-X support yet, so the stack
- * calls Poll() from its network thread. All calls are made with the stack
- * lock held, so a driver needs no locking of its own.
+ * calls Poll() from its network thread with the stack lock held.
  */
 #pragma once
 #include <kumo/prelude.hpp>
@@ -72,6 +71,10 @@ namespace kumo::horizon::hznet::netdev {
             /* Hand every frame received since the last call to `receiver`, and reclaim finished */
             /* transmissions. Returns how many frames were delivered. */
             virtual int Poll(IFrameReceiver *receiver) = 0;
+
+            /* Runs on the network thread outside the stack lock. Drivers must serialize any */
+            /* maintenance that shares state with Send(). */
+            virtual void Maintain() {}
     };
 
 }

@@ -19,6 +19,7 @@ struct CommandOptions {
     BufferMode buffers = BufferMode::Auto;
     size_t input_pointer_size = 0, output_pointer_size = 0;
     bool normal_map_alias = false;
+    size_t mapped_input_prefix = 0; // MapAlias inputs before any AutoSelect inputs.
 };
 template<size_t Inputs, size_t Outputs> struct Arguments {
     std::array<MappedBuffer, Inputs> inputs{};
@@ -64,11 +65,12 @@ consteval TypedCommand MakeCommand(u32 id, CommandOptions options) {
     static_assert(Inputs <= 15 && Outputs <= 13);
     static_assert(std::is_same_v<Input, NoData> || IsWireType<Input>, "Input must declare an audited wire layout");
     static_assert(std::is_same_v<Output, NoData> || IsWireType<Output>, "Output must declare an audited wire layout");
-    if (options.copies > 15 || options.moves > 15) __builtin_abort();
+    if (options.copies > 15 || options.moves > 15 || options.mapped_input_prefix > Inputs ||
+        (options.mapped_input_prefix && options.buffers != BufferMode::Auto)) __builtin_abort();
     size_t descriptor_bytes = 0, pointer_sizes = 0;
     switch (options.buffers) {
     case BufferMode::Auto:
-        descriptor_bytes = Inputs * 20 + Outputs * 20;
+        descriptor_bytes = (Inputs + Outputs) * 20 - options.mapped_input_prefix * sizeof(HipcStaticDescriptor);
         pointer_sizes = Outputs;
         break;
     case BufferMode::Mapped:
@@ -115,7 +117,7 @@ consteval TypedCommand MakeCommand(u32 id, CommandOptions options) {
         uintptr_t input_end = reinterpret_cast<uintptr_t>(r.pointer_buffer);
         size_t output_pointer_size = o.output_pointer_size;
         if (o.buffers == BufferMode::Auto) {
-            if (!DecodeMappedAutoBuffers(r.input.hipc, args.inputs.data(), Inputs, args.outputs.data(), Outputs) ||
+            if (!DecodeMappedAutoBuffers(r.input.hipc, args.inputs.data(), Inputs, args.outputs.data(), Outputs, o.mapped_input_prefix) ||
                 !HasOnlyMappedAutoOutputs(r.input, WireSize<Input>, Outputs)) return false;
         } else {
             if (m.num_exch_buffers || m.num_send_statics != pointer_inputs ||

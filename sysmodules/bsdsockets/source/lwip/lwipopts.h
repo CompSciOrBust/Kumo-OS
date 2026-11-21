@@ -70,10 +70,11 @@
 #define LWIP_DHCP                       1
 #define LWIP_DHCP_DOES_ACD_CHECK        0
 #define LWIP_ACD                        0
-/* The resolver is not exposed yet (sfdnsres is a later step). It is enabled so that DHCP records */
-/* the DNS servers it is given. */
+/* The sfdnsres service uses the DNS servers configured by DHCP or bsdcfg. */
 #define LWIP_DNS                        1
 #define DNS_MAX_SERVERS                 2
+#define DNS_TABLE_SIZE                  8
+#define DNS_MAX_REQUESTS                8
 #define LWIP_DHCP_MAX_DNS_SERVERS       DNS_MAX_SERVERS
 
 /* ---- UDP ---- */

@@ -26,6 +26,7 @@
 #include <sys/select.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <netdb.h>
 #include <arpa/inet.h>
 #include <poll.h>
 #include <fcntl.h>
@@ -35,6 +36,7 @@
 /* libnx leaves the service header out of switch.h, and it has no C linkage guard of its own. */
 extern "C" {
     #include <switch/services/bsd.h>
+    #include <switch/services/sfdnsres.h>
 }
 
 namespace {
@@ -1195,6 +1197,80 @@ namespace {
             if (tmem.handle != INVALID_HANDLE) ::tmemClose(std::addressof(tmem));
         }
 
+        void TestDnsResolver() {
+            addrinfo hints{};
+            hints.ai_family = AF_INET;
+            hints.ai_socktype = SOCK_STREAM;
+            hints.ai_flags = AI_CANONNAME;
+            addrinfo *list = nullptr;
+            int rc = ::getaddrinfo("localhost", "https", &hints, &list);
+            sockaddr_in address{};
+            if (list && list->ai_addrlen == sizeof(address))
+                std::memcpy(&address, list->ai_addr, sizeof(address));
+            Check("sfdnsres: getaddrinfo host, named service and canonical name",
+                  rc == 0 && list && list->ai_protocol == IPPROTO_TCP && list->ai_canonname &&
+                  std::strcmp(list->ai_canonname, "localhost") == 0 &&
+                  address.sin_addr.s_addr == htonl(INADDR_LOOPBACK) && ntohs(address.sin_port) == 443, rc);
+            if (list) ::freeaddrinfo(list);
+
+            const hostent *host = ::gethostbyname("localhost");
+            u32 host_ip = 0;
+            if (host && host->h_length == sizeof(host_ip) && host->h_addr_list[0])
+                std::memcpy(&host_ip, host->h_addr_list[0], sizeof(host_ip));
+            Check("sfdnsres: gethostbyname IPv4 serialization",
+                  host && host->h_addrtype == AF_INET && host_ip == htonl(INADDR_LOOPBACK), h_errno);
+            const u32 loopback = htonl(INADDR_LOOPBACK);
+            host = ::gethostbyaddr(&loopback, sizeof(loopback), AF_INET);
+            Check("sfdnsres: gethostbyaddr localhost", host && host->h_name &&
+                  std::strcmp(host->h_name, "localhost") == 0, h_errno);
+
+            char host_text[32]{}, service_text[16]{};
+            address = {};
+            address.sin_len = sizeof(address);
+            address.sin_family = AF_INET;
+            address.sin_addr.s_addr = loopback;
+            address.sin_port = htons(443);
+            rc = ::getnameinfo(reinterpret_cast<const sockaddr *>(&address), sizeof(address),
+                               host_text, sizeof(host_text), service_text, sizeof(service_text),
+                               NI_NUMERICHOST | NI_NUMERICSERV);
+            Check("sfdnsres: numeric getnameinfo",
+                  rc == 0 && !std::strcmp(host_text, "127.0.0.1") && !std::strcmp(service_text, "443"), rc);
+
+            u32 cancel_handle{};
+            Result request = ::sfdnsresGetCancelHandleRequest(&cancel_handle);
+            if (R_SUCCEEDED(request)) request = ::sfdnsresCancelRequest(cancel_handle);
+            char serialized[128];
+            u32 host_error{}, error{}, size{};
+            if (R_SUCCEEDED(request)) {
+                request = ::sfdnsresGetHostByNameRequest(cancel_handle, false, "localhost",
+                                                        &host_error, &error, serialized, sizeof(serialized), &size);
+            }
+            Check("sfdnsres: pre-cancelled request returns a resolver error",
+                  R_SUCCEEDED(request) && cancel_handle && static_cast<s32>(host_error) == NETDB_INTERNAL &&
+                  error == 125 && size == 0, request);
+
+            Service resolver{};
+            request = ::smGetService(&resolver, "sfdnsres");
+            if (R_SUCCEEDED(request)) {
+                const struct { u32 version, count; u64 pid; } input{1, 0, 0};
+                struct { u32 size; s32 result, host_error, error; } output{};
+                constexpr char node[] = "127.0.0.1", port[] = "443";
+                request = serviceDispatchInOut(&resolver, 12, input, output,
+                    .buffer_attrs = {SfBufferAttr_HipcMapAlias | SfBufferAttr_In,
+                                     SfBufferAttr_HipcMapAlias | SfBufferAttr_In,
+                                     SfBufferAttr_HipcMapAlias | SfBufferAttr_In,
+                                     SfBufferAttr_HipcAutoSelect | SfBufferAttr_Out,
+                                     SfBufferAttr_HipcAutoSelect | SfBufferAttr_In},
+                    .buffers = {{node, sizeof(node)}, {port, sizeof(port)}, {nullptr, 0},
+                                {serialized, sizeof(serialized)}, {nullptr, 0}}, .in_send_pid = true);
+                Check("sfdnsres: command 12 accepts mixed mapped and auto-select buffers",
+                      R_SUCCEEDED(request) && output.result == 0 && output.size == 86, request);
+                ::serviceClose(&resolver);
+            } else {
+                Check("sfdnsres: open option-aware resolver", false, request);
+            }
+        }
+
         void TestReinitialize() {
             /* Leave sockets open on purpose: the service must close them when the client goes. */
             const int leaked = ::socket(AF_INET, SOCK_STREAM, 0);
@@ -1232,6 +1308,7 @@ namespace {
             TestBlockingOnLoopback();
             TestAbandonedClient();
             TestSystemDuplicate();
+            TestDnsResolver();
 
             const u32 address = WaitForLease();
             if (address == 0) {

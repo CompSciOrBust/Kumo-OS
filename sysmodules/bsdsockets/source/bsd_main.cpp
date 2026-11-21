@@ -2,7 +2,7 @@
  * Sockets system module for Horizon on generic aarch64 hardware.
  *
  * Layers, top to bottom:
- *   ipc/      bsd:u, bsd:s and bsdcfg session objects, client bookkeeping, the server loops
+ *   ipc/      bsd:u, bsd:s, bsdcfg and sfdnsres session objects, client bookkeeping, the server loops
  *   socket/   BSD socket semantics (descriptors, blocking, options) on lwIP's callback API
  *   stack/    lwIP, the stack lock, the network thread, interface configuration
  *   lwip/     the lwIP port: options, system glue, wrappers that compile vendor/lwip
@@ -17,6 +17,7 @@
 #include "stack/bsd_stack.hpp"
 #include "ipc/bsd_server.hpp"
 #include "ipc/bsdcfg_server.hpp"
+#include "ipc/dns_server.hpp"
 
 extern "C" {
     u32 __nx_applet_type = AppletType_None;
@@ -57,6 +58,7 @@ int main(int, char **) {
     }
     net::ipc::InitializeServer();
     net::ipc::StartConfigServer();
-    net::Log("[bsdsockets] serving bsd:u, bsd:s, bsdcfg\n");
+    net::ipc::StartDnsServer();
+    net::Log("[bsdsockets] serving bsd:u, bsd:s, bsdcfg, sfdnsres\n");
     net::ipc::LoopServer();
 }

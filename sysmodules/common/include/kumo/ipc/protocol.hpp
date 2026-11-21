@@ -66,19 +66,22 @@ struct MappedBuffer {
 
 /* Auto-select requests contain both pointer and mapped descriptors. When a
  * server advertises a zero pointer-buffer size, libnx leaves the pointer
- * descriptors empty and uses the mapped descriptors. Call only after the
+ * descriptors empty and uses the mapped descriptors. Direct MapAlias inputs
+ * may precede any auto-select inputs. Call only after the
  * envelope has been inspected. Output pointer-size validation must be done
  * separately using the command's CMIF pointer-size table. */
 inline bool DecodeMappedAutoBuffers(const HipcParsedRequest &request,
                                     MappedBuffer *inputs, size_t input_count,
-                                    MappedBuffer *outputs, size_t output_count) {
+                                    MappedBuffer *outputs, size_t output_count, size_t mapped_input_prefix = 0) {
     const auto &meta = request.meta;
-    if (meta.num_send_statics != input_count || meta.num_send_buffers != input_count ||
+    if (mapped_input_prefix > input_count || meta.num_send_statics != input_count - mapped_input_prefix ||
+        meta.num_send_buffers != input_count ||
         meta.num_recv_statics != output_count || meta.num_recv_buffers != output_count ||
         meta.num_exch_buffers != 0) return false;
     if ((input_count && !inputs) || (output_count && !outputs)) return false;
     for (size_t i = 0; i < input_count; ++i) {
-        if (hipcGetStaticSize(&request.data.send_statics[i]) != 0) return false;
+        if (i >= mapped_input_prefix &&
+            hipcGetStaticSize(&request.data.send_statics[i - mapped_input_prefix]) != 0) return false;
         const auto &descriptor = request.data.send_buffers[i];
         inputs[i] = {hipcGetBufferAddress(&descriptor), hipcGetBufferSize(&descriptor)};
     }

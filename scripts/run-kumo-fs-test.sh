@@ -35,6 +35,9 @@ for table in (struct.pack("<I", 24), directory_entries, struct.pack("<I", 0), fi
     offset += len(table)
 romfs = rom_header + struct.pack("<Q", body_offset) + payload + rom_tables
 (root / "romfs.bin").write_bytes(romfs)
+# Exercise the generated Program NCA with both ExeFS and a multi-level RomFS hash tree.
+program_romfs = romfs.ljust(0x80001, b"\0")
+(root / "program-romfs.nca").write_bytes(build_nca(0, 0x0100000000001000, files, program_romfs))
 
 # A short top layer exercises IVFC's zero padding at both levels.
 block_size = 0x200
@@ -104,4 +107,4 @@ fi
 ${CXX:-c++} -std=c++23 -Wno-invalid-constexpr -fsanitize=address,undefined -fno-sanitize-recover=all -g \
     -include switch/crypto/sha256.h -Itests/ipc/mock -I"$DEVKITPRO/libnx/include" -Isysmodules/common/include \
     tests/fs/kumo_fs_test.cpp sysmodules/common/source/fs/*.cpp "$@" -o "$WORK/test"
-"$WORK/test" "$WORK/package.pfs" "$WORK/program.nca" "$WORK/romfs.bin" "$WORK/romfs.nca" "$WORK/compression.nca" "$WORK/patch.nca"
+"$WORK/test" "$WORK/package.pfs" "$WORK/program.nca" "$WORK/romfs.bin" "$WORK/romfs.nca" "$WORK/compression.nca" "$WORK/patch.nca" "$WORK/program-romfs.nca"

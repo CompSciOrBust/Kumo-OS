@@ -14,6 +14,7 @@ two NCAs used to package a program for Kumo:
 subsdk* modules, and writes:
 
   * a Program NCA, whose section 0 is that directory as a partition filesystem;
+    an optional --romfs directory is packaged as section 1;
   * a Meta NCA, holding the content metadata (.cnmt) that tells ncm the
     program's ID, version and which content belongs to it.
 
@@ -55,8 +56,10 @@ NCA_TYPE_META = 1
 NCA_TYPE_NAMES = {0: "Program", 1: "Meta", 2: "Control", 3: "Manual", 4: "Data", 5: "PublicData"}
 
 # fssystem::NcaFsHeader
+FS_TYPE_ROMFS = 0
 FS_TYPE_PARTITION = 1
 HASH_TYPE_HIERARCHICAL_SHA256 = 2
+HASH_TYPE_IVFC = 3
 ENCRYPTION_TYPE_NONE = 1
 
 # ncm::ContentMetaType, ncm::ContentType
@@ -128,12 +131,51 @@ def build_hashed_section(data):
     return section, header.ljust(FS_HEADER_SIZE, b"\0")
 
 
-def build_nca(content_type, program_id, files):
-    """An NCA whose section 0 is a partition filesystem of files."""
-    section, fs_header = build_hashed_section(build_partition_fs(files))
-    content_size = BODY_OFFSET + len(section)
+def hash_blocks(data, block_size, pad=False):
+    hashes = bytearray()
+    for offset in range(0, len(data), block_size):
+        block = data[offset:offset + block_size]
+        if pad:
+            block = block.ljust(block_size, b"\0")
+        hashes.extend(sha256(block))
+    return bytes(hashes)
 
-    fs_info = struct.pack("<IIII", BODY_OFFSET // SECTOR, content_size // SECTOR, 0, 0)
+
+def build_romfs_section(romfs):
+    """Wrap a RomFS image in an IVFC hash tree."""
+    block_size = MIN_HASH_BLOCK_SIZE
+    layers = [romfs]
+    while len(layers[-1]) > block_size:
+        layers.append(hash_blocks(layers[-1], block_size, pad=True))
+    if len(layers) > 6:
+        fail("RomFS exceeds the NCA IVFC layer limit")
+
+    header = struct.pack("<HBBBB2x4sIII", 2, FS_TYPE_ROMFS, HASH_TYPE_IVFC,
+                         ENCRYPTION_TYPE_NONE, 0, b"IVFC", 0x20000, 32, len(layers) + 1)
+    section = bytearray()
+    for layer in reversed(layers):
+        header += struct.pack("<QQI4x", len(section), len(layer), block_size.bit_length() - 1)
+        section.extend(layer)
+        section.extend(b"\0" * (align_up(len(section), block_size) - len(section)))
+
+    header = header.ljust(0xc8, b"\0") + hash_blocks(layers[-1], block_size, pad=True)
+    return bytes(section), header.ljust(FS_HEADER_SIZE, b"\0")
+
+
+def build_nca(content_type, program_id, files, romfs=None):
+    """An NCA with a PFS0 in section 0 and an optional RomFS in section 1."""
+    sections = [build_hashed_section(build_partition_fs(files))]
+    if romfs is not None:
+        sections.append(build_romfs_section(romfs))
+
+    content_size = BODY_OFFSET
+    fs_info = bytearray()
+    fs_hashes = bytearray()
+    for section, fs_header in sections:
+        end = content_size + len(section)
+        fs_info.extend(struct.pack("<IIII", content_size // SECTOR, end // SECTOR, 0, 0))
+        fs_hashes.extend(sha256(fs_header))
+        content_size = end
 
     header = b"\0" * 0x200                                      # the two signatures: unsigned
     header += struct.pack("<4sBBBB", b"NCA3", 0, content_type, 0, 0)
@@ -141,11 +183,13 @@ def build_nca(content_type, program_id, files):
     header += b"\0" * 0x10                                      # key generations, reserved
     header += b"\0" * 0x10                                      # rights ID: none
     header += fs_info.ljust(0x10 * FS_HEADER_COUNT, b"\0")
-    header += sha256(fs_header).ljust(0x20 * FS_HEADER_COUNT, b"\0")
+    header += fs_hashes.ljust(0x20 * FS_HEADER_COUNT, b"\0")
     header += b"\0" * 0x100                                     # key area: unused
     assert len(header) == NCA_HEADER_SIZE
 
-    return header + fs_header.ljust(FS_HEADER_SIZE * FS_HEADER_COUNT, b"\0") + section
+    fs_headers = b"".join(fs_header for _, fs_header in sections)
+    return header + fs_headers.ljust(FS_HEADER_SIZE * FS_HEADER_COUNT, b"\0") + b"".join(
+        section for section, _ in sections)
 
 
 def content_id(nca):
@@ -181,9 +225,26 @@ def read_code_directory(path):
     return files
 
 
+def read_romfs_directory(path):
+    if not os.path.isdir(path):
+        fail(f"{path} is not a RomFS directory")
+    devkitpro = os.environ.get("DEVKITPRO", "/opt/devkitpro")
+    tool = shutil.which("build_romfs") or os.path.join(devkitpro, "tools", "bin", "build_romfs")
+    with tempfile.TemporaryDirectory() as temp:
+        image = os.path.join(temp, "romfs.bin")
+        try:
+            subprocess.run([tool, path, image], check=True)
+            with open(image, "rb") as f:
+                return f.read()
+        except (OSError, subprocess.CalledProcessError) as error:
+            fail(f"could not build RomFS from {path}: {error}")
+
+
 def cmd_program(args):
     program_id = int(args.id, 0)
-    program_nca = build_nca(NCA_TYPE_PROGRAM, program_id, read_code_directory(args.code))
+    code = read_code_directory(args.code)
+    romfs = read_romfs_directory(args.romfs) if args.romfs is not None else None
+    program_nca = build_nca(NCA_TYPE_PROGRAM, program_id, code, romfs)
 
     meta_name = f"SystemProgram_{program_id:016x}.cnmt"
     meta_nca = build_nca(NCA_TYPE_META, program_id, [(meta_name, build_content_meta(program_id, args.version, program_nca))])
@@ -231,6 +292,24 @@ def cmd_install(args):
         subprocess.run([sys.executable, HZDISK, "put", args.image, partition, stage, "/"], check=True, stdout=subprocess.DEVNULL)
 
 
+def verify_romfs_section(section, header):
+    magic, _, master_size, count = struct.unpack_from("<4sIII", header, 8)
+    if magic != b"IVFC" or master_size != 32 or not 2 <= count <= 7:
+        return False, 0
+
+    hashes = header[0xc8:0xe8]
+    for index in range(count - 1):
+        offset, size, order = struct.unpack_from("<QQI", header, 0x18 + 0x18 * index)
+        if not 5 <= order <= 22 or size == 0 or offset + size > len(section):
+            return False, 0
+        block_size = 1 << order
+        layer = section[offset:offset + size]
+        if hashes != hash_blocks(layer, block_size, pad=True):
+            return False, block_size
+        hashes = layer
+    return True, block_size
+
+
 def cmd_info(args):
     with open(args.nca, "rb") as f:
         nca = f.read()
@@ -253,13 +332,16 @@ def cmd_info(args):
         header_ok = sha256(fs_header) == nca[0x280 + 0x20 * index:][:0x20]
 
         section = nca[start * SECTOR:end * SECTOR]
-        block_size, layers = struct.unpack_from("<ii", fs_header, 0x28)
-        table_offset, table_size, data_offset, data_size = struct.unpack_from("<qqqq", fs_header, 0x30)
-        table = section[table_offset:table_offset + table_size]
-        data = section[data_offset:data_offset + data_size]
-        data_ok = (fs_header[3] == HASH_TYPE_HIERARCHICAL_SHA256 and layers == 2 and
-                   sha256(table) == fs_header[0x8:0x28] and
-                   table == b"".join(sha256(data[i:i + block_size]) for i in range(0, len(data), block_size)))
+        data = b""
+        if fs_header[3] == HASH_TYPE_IVFC:
+            data_ok, block_size = verify_romfs_section(section, fs_header)
+        else:
+            block_size, layers = struct.unpack_from("<ii", fs_header, 0x28)
+            table_offset, table_size, data_offset, data_size = struct.unpack_from("<qqqq", fs_header, 0x30)
+            table = section[table_offset:table_offset + table_size]
+            data = section[data_offset:data_offset + data_size]
+            data_ok = (fs_header[3] == HASH_TYPE_HIERARCHICAL_SHA256 and layers == 2 and block_size > 0 and
+                       sha256(table) == fs_header[0x8:0x28] and table == hash_blocks(data, block_size))
         ok = ok and header_ok and data_ok
         print(f"section {index}    {len(section)} bytes, hash block {block_size:#x}, "
               f"header {'ok' if header_ok else 'BAD'}, data {'ok' if data_ok else 'BAD'}")
@@ -284,6 +366,7 @@ def main():
     program.add_argument("--id", required=True, help="program ID, e.g. 0x0100000000001000")
     program.add_argument("--code", required=True, help="directory with main, main.npdm and other modules")
     program.add_argument("--version", type=lambda text: int(text, 0), default=0, help="content version (default 0)")
+    program.add_argument("--romfs", help="directory to package in the Program NCA RomFS")
     program.add_argument("--out", required=True, help="directory to write the NCAs to")
     program.set_defaults(handler=cmd_program)
 

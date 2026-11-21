@@ -28,4 +28,6 @@ namespace kumo::horizon::hzfs::content {
      */
     Result OpenCodeFileSystem(std::shared_ptr<fs::fsa::IFileSystem> *out, ncm::ProgramId program_id, ncm::StorageId storage_id);
 
+    Result OpenProgramRomStorage(std::shared_ptr<fs::IStorage> *out, ncm::ProgramId program_id, ncm::StorageId storage_id);
+
 }

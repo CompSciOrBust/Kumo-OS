@@ -235,6 +235,15 @@ class Proxy final : public ServiceObject {
                             return ReturnFileSystem(args.reply, std::move(fs));
                         }>(110),
             MakeCommand<Proxy, NoData, NoData, 0, 0,
+                        [](Proxy &self, const NoData &, NoData &, auto &args) -> Result {
+                            registry::ProgramInfo program{};
+                            const u64 pid = self.process_id.load(std::memory_order_relaxed);
+                            KUMO_UNLESS(pid != 0 && registry::GetProgramInfo(&program, pid), ResultTargetNotFound());
+                            std::shared_ptr<IStorage> storage;
+                            KUMO_TRY(content::OpenProgramRomStorage(&storage, program.program_id, program.storage_id));
+                            return ReturnObject<kumo::fs::StorageService>(args.reply, std::move(storage));
+                        }>(200),
+            MakeCommand<Proxy, NoData, NoData, 0, 0,
                         [](Proxy &, const NoData &, NoData &, auto &args) {
                             return ReturnObject<DeviceOperator>(args.reply);
                         }>(400),
@@ -277,6 +286,7 @@ class Proxy final : public ServiceObject {
         case 52:
         case 58:
         case 110:
+        case 200:
         case 400:
             break;
         default:

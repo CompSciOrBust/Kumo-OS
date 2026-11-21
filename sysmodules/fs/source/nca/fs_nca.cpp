@@ -222,6 +222,15 @@ struct OwnedSection {
     std::shared_ptr<Reader> reader;
     archive::PlaintextNca::Section section;
 };
+
+Result OpenOwnedSection(std::shared_ptr<OwnedSection> *out, std::shared_ptr<Reader> reader, s32 index) {
+    auto owner = AllocateShared<OwnedSection>();
+    KUMO_UNLESS(owner, ResultAllocationMemoryFailedInNcaFileSystemServiceImplB());
+    owner->reader = std::move(reader);
+    KUMO_TRY(owner->reader->archive.OpenSection(index, {MetadataLimit, MetadataLimit}, owner->section));
+    *out = std::move(owner);
+    return 0;
+}
 }
 
 Result OpenReader(std::shared_ptr<Reader> *out, std::shared_ptr<IFileSystem> base, const char *path) {
@@ -235,11 +244,17 @@ Result OpenReader(std::shared_ptr<Reader> *out, std::shared_ptr<IFileSystem> bas
     return 0;
 }
 
+Result OpenRomStorage(std::shared_ptr<IStorage> *out, std::shared_ptr<Reader> reader, s32 index) {
+    std::shared_ptr<OwnedSection> owner;
+    KUMO_TRY(OpenOwnedSection(&owner, std::move(reader), index));
+    KUMO_UNLESS(owner->section.Type() == archive::PlaintextNca::FileSystemType::RomFs, ResultPreconditionViolation());
+    *out = std::shared_ptr<IStorage>(owner, &owner->section);
+    return 0;
+}
+
 Result OpenSectionFileSystem(std::shared_ptr<IFileSystem> *out, std::shared_ptr<Reader> reader, s32 index) {
-    auto owner = AllocateShared<OwnedSection>();
-    KUMO_UNLESS(owner, ResultAllocationMemoryFailedInNcaFileSystemServiceImplB());
-    owner->reader = std::move(reader);
-    KUMO_TRY(owner->reader->archive.OpenSection(index, {MetadataLimit, MetadataLimit}, owner->section));
+    std::shared_ptr<OwnedSection> owner;
+    KUMO_TRY(OpenOwnedSection(&owner, std::move(reader), index));
     auto storage = std::shared_ptr<IStorage>(owner, &owner->section);
     if (owner->section.Type() == archive::PlaintextNca::FileSystemType::RomFs) {
         return Mount<archive::RomFileSystem>(out, std::move(storage));

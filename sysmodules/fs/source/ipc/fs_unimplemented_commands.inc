@@ -40,7 +40,6 @@ constexpr UnimplementedCommand UnimplementedProxyCommands[] = {
     {102, MAKEHOSVERSION(12, 0, 0), UINT32_MAX}, // FormatBaseFileSystem
     {120, MAKEHOSVERSION(6, 0, 0), MAKEHOSVERSION(9, 2, 0)}, // OpenCloudBackupWorkStorageFileSystem
     {130, MAKEHOSVERSION(7, 0, 0), UINT32_MAX}, // OpenCustomStorageFileSystem
-    {200, 0, UINT32_MAX}, // OpenDataStorageByCurrentProcess
     {201, MAKEHOSVERSION(3, 0, 0), UINT32_MAX}, // OpenDataStorageByProgramId
     {202, 0, UINT32_MAX}, // OpenDataStorageByDataId
     {203, 0, UINT32_MAX}, // OpenPatchDataStorageByCurrentProcess

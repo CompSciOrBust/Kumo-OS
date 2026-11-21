@@ -232,7 +232,7 @@ void CheckRom(Storage &storage) {
 }
 
 int main(int argc, char **argv) {
-    assert(argc == 7);
+    assert(argc == 8);
     Memory package(argv[1]);
     CheckPackage(package);
     CheckStorageWire(package);
@@ -314,6 +314,18 @@ int main(int argc, char **argv) {
     sha256CalculateHash(ivfc.bytes.data() + 0x280, fs_header, 0x200);
     assert(reader.Open(ivfc) == 0);
     assert(reader.OpenSection(0, limits, section) == Error(4529));
+    Memory bundled(argv[7]);
+    assert(reader.Open(bundled) == 0);
+    assert(reader.HasSection(0) && reader.HasSection(1) && !reader.HasSection(2));
+    assert(reader.OpenSection(0, limits, section) == 0);
+    CheckPackage(section);
+    assert(reader.OpenSection(1, {0x8000, 0x3000}, section) == 0);
+    assert(section.Type() == PlaintextNca::FileSystemType::RomFs);
+    CheckRom(section);
+    u64 bundled_size;
+    assert(section.GetSize(bundled_size) == 0 && bundled_size == 0x80001);
+    assert(section.Read(bundled_size - 1, {&first, 1}) == 0 && first == std::byte{});
+
     Memory compressed(argv[5]);
     assert(reader.Open(compressed) == 0);
     assert(reader.OpenSection(0, {0x7fff, 4096}, section) == AllocationFailed);

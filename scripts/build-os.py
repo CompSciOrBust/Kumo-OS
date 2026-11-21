@@ -16,6 +16,7 @@ system module the configuration names, and writes a single disk image:
     indexes them and pm and the loader start them. Programs marked "boot"
     are listed in SYSTEM:/boot.lst, which the launcher module reads at boot.
 
+A program module can include a romfs/ directory for bundled read-only files.
 Whether a module is a KIP or a program is read from its own build files, so
 the configuration only lists names. The image boots in QEMU
 (scripts/run-os.sh).
@@ -250,8 +251,12 @@ def main():
             if not os.path.isfile(module.output(extension)):
                 fail(f"module '{module.source}' did not produce {os.path.relpath(module.output(extension), ROOT)}")
             shutil.copyfile(module.output(extension), os.path.join(code, target))
-        run([sys.executable, "scripts/hznca.py", "program", "--id", hex(module.program_id()),
-             "--version", module.options.get("version", "0"), "--code", code, "--out", nca_directory])
+        command = [sys.executable, "scripts/hznca.py", "program", "--id", hex(module.program_id()),
+                   "--version", module.options.get("version", "0"), "--code", code, "--out", nca_directory]
+        romfs = os.path.join(module.directory, "romfs")
+        if os.path.isdir(romfs):
+            command += ["--romfs", romfs]
+        run(command)
 
     # 5. The disk image: boot partition with the KIPs, then the programs into SYSTEM's content storage.
     environment = dict(os.environ, KIPS=kip_directory, LAYOUT=settings["layout"])

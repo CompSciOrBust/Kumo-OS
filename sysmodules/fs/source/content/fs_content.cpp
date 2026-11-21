@@ -120,6 +120,18 @@ namespace kumo::horizon::hzfs::content {
         }
 
         /* Search dir_path of the content storage for the Program NCA of program_id. Sets *out to nullptr if there is none. */
+        Result OpenContentReader(std::shared_ptr<nca::Reader> *out, std::shared_ptr<fs::fsa::IFileSystem> base_fs,
+                                 const char *path, kumo::fs::PlaintextNca::ContentType type, u64 program_id) {
+            KUMO_UNLESS(HasSuffix(path, NcaExtension), fs::ResultPathNotFound());
+            std::shared_ptr<nca::Reader> reader;
+            KUMO_TRY(nca::OpenReader(&reader, std::move(base_fs), path));
+            KUMO_UNLESS(IsContentType(*reader, type), fs::ResultPreconditionViolation());
+            KUMO_UNLESS(program_id == ncm::InvalidProgramId.value || reader->archive.ProgramId() == program_id,
+                        fs::ResultInvalidNcaId());
+            *out = std::move(reader);
+            return 0;
+        }
+
         Result FindProgramContent(std::shared_ptr<nca::Reader> *out, const std::shared_ptr<fs::fsa::IFileSystem> &storage_fs, const char *dir_path, ncm::ProgramId program_id, int depth) {
             fs::Path fs_path;
             KUMO_TRY(fs_path.InitializeWithNormalization(dir_path));
@@ -258,23 +270,22 @@ namespace kumo::horizon::hzfs::content {
         s32 section;
         KUMO_TRY(GetContentLocation(std::addressof(content_type), std::addressof(section), type));
 
-        KUMO_UNLESS(HasSuffix(content_path, NcaExtension), fs::ResultPathNotFound());
-
         std::shared_ptr<nca::Reader> reader;
-        KUMO_TRY(nca::OpenReader(std::addressof(reader), std::move(base_fs), content_path));
-
-        KUMO_UNLESS(IsContentType(*reader, content_type), fs::ResultPreconditionViolation());
-        KUMO_UNLESS(program_id == ncm::InvalidProgramId.value || reader->archive.ProgramId() == program_id, fs::ResultInvalidNcaId());
+        KUMO_TRY(OpenContentReader(&reader, std::move(base_fs), content_path, content_type, program_id));
 
         KUMO_RETURN(nca::OpenSectionFileSystem(out, std::move(reader), section));
     }
 
-    Result OpenCodeFileSystem(std::shared_ptr<fs::fsa::IFileSystem> *out, ncm::ProgramId program_id, ncm::StorageId storage_id) {
+    static Result OpenProgramReader(std::shared_ptr<nca::Reader> *out, ncm::ProgramId program_id, ncm::StorageId storage_id) {
         if (IsLocationResolverAvailable()) {
             auto path = fs::AllocateShared<ContentPath>();
             KUMO_UNLESS(path != nullptr, fs::ResultAllocationMemoryFailedInFileSystemProxyImplA());
             KUMO_TRY(ResolveProgramPath(path.get(), program_id, storage_id));
-            KUMO_RETURN(OpenFileSystemByPath(out, path->str, fs::impl::FileSystemProxyType_Code, program_id.value));
+            std::shared_ptr<fs::fsa::IFileSystem> base_fs;
+            const char *content_path;
+            KUMO_TRY(ParseMountName(&base_fs, &content_path, path->str));
+            return OpenContentReader(out, std::move(base_fs), content_path,
+                                     kumo::fs::PlaintextNca::ContentType::Program, program_id.value);
         }
 
         /* Without ncm there is no database to ask, so look at the content itself. */
@@ -289,7 +300,21 @@ namespace kumo::horizon::hzfs::content {
         KUMO_UNLESS(reader != nullptr, fs::ResultTargetNotFound());
         Log("[fs] program %016lx: found in the content storage (ncm is not running)\n", program_id.value);
 
+        *out = std::move(reader);
+        return 0;
+    }
+
+    Result OpenCodeFileSystem(std::shared_ptr<fs::fsa::IFileSystem> *out, ncm::ProgramId program_id, ncm::StorageId storage_id) {
+        std::shared_ptr<nca::Reader> reader;
+        KUMO_TRY(OpenProgramReader(&reader, program_id, storage_id));
         KUMO_RETURN(nca::OpenSectionFileSystem(out, std::move(reader), nca::ProgramSection_Code));
+    }
+
+    Result OpenProgramRomStorage(std::shared_ptr<fs::IStorage> *out, ncm::ProgramId program_id, ncm::StorageId storage_id) {
+        std::shared_ptr<nca::Reader> reader;
+        KUMO_TRY(OpenProgramReader(&reader, program_id, storage_id));
+        KUMO_UNLESS(reader->archive.HasSection(nca::ProgramSection_Data), fs::ResultTargetNotFound());
+        KUMO_RETURN(nca::OpenRomStorage(out, std::move(reader), nca::ProgramSection_Data));
     }
 
 }

@@ -11,6 +11,7 @@ struct Reader {
 };
 
 Result OpenReader(std::shared_ptr<Reader> *out, std::shared_ptr<fs::fsa::IFileSystem> base, const char *path);
+Result OpenRomStorage(std::shared_ptr<fs::IStorage> *out, std::shared_ptr<Reader> reader, s32 index);
 Result OpenSectionFileSystem(std::shared_ptr<fs::fsa::IFileSystem> *out, std::shared_ptr<Reader> reader, s32 section);
 Result OpenPackageFileSystem(std::shared_ptr<fs::fsa::IFileSystem> *out, std::shared_ptr<fs::fsa::IFileSystem> base,
                              const char *path);

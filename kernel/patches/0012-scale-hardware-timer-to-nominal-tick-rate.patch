@@ -1,59 +1,52 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: CompSciOrBust <54033033+CompSciOrBust@users.noreply.github.com>
 Date: Fri, 13 Nov 2026 00:00:00 +0000
-Subject: [PATCH] kern: scale the hardware timer to the nominal tick rate
+Subject: [PATCH] kern: scale hardware timer without accumulated deadline drift
 
-The kernel converts every timeout to ticks with svc::TicksPerSecond, the
-Switch's fixed 19.2 MHz, and reads and programs the CPU counter as if it
-ran at that rate.  On other machines it does not: QEMU's counter runs at
-62.5 MHz and Compute Engine T2A's at 25 MHz, so every sleep and timeout
-ended early by that ratio.  On the generic-aarch64 board, read the real
-rate from CNTFRQ_EL0 when the timer is initialised and convert between
-counter values and nominal ticks where the counter is read (GetCount)
-and programmed (SetCompareValue).  Nothing else in the kernel touches the
-counter, so every kernel time, including svcGetSystemTick, is then in
-19.2 MHz ticks.  Userland reads the counter directly and is unaffected.
+Convert between the physical counter frequency and the 19.2 MHz kernel
+tick rate using quotient and remainder arithmetic. Truncated fixed-point
+factors accumulate error with the absolute counter value, which can place
+short deadlines in the past on hosts with a long-running counter. Round
+deadlines up and saturate out-of-range values. Avoid 128-bit division,
+which is unavailable in the freestanding kernel.
 
----
-diff --git a/libraries/libmesosphere/include/mesosphere/arch/arm64/kern_k_hardware_timer.hpp b/libraries/libmesosphere/include/mesosphere/arch/arm64/kern_k_hardware_timer.hpp
-index 9ffe57934..942b593d4 100644
 --- a/libraries/libmesosphere/include/mesosphere/arch/arm64/kern_k_hardware_timer.hpp
 +++ b/libraries/libmesosphere/include/mesosphere/arch/arm64/kern_k_hardware_timer.hpp
-@@ -20,6 +20,20 @@
+@@ -20,6 +20,15 @@
  namespace ams::kern::arch::arm64 {
  
      class KHardwareTimer : public KInterruptTask, public KHardwareTimerBase {
 +        #if defined(ATMOSPHERE_BOARD_GENERIC_AARCH64)
 +        private:
-+            /* The kernel counts time in ticks of svc::TicksPerSecond (the Switch's 19.2 MHz) */
-+            /* everywhere: every timeout is converted with that constant. This board's counter */
-+            /* runs at whatever rate the machine has (CNTFRQ_EL0), so the counter is converted */
-+            /* to and from nominal ticks at the only two places it is read or programmed. */
-+            /* Both factors are 32.32 fixed point; until Initialize() sets them, a tick is a */
-+            /* counter step, as before. */
-+            static constexpr u64 FrequencyScaleShift = 32;
-+            static constinit inline u64 s_counter_to_tick = UINT64_C(1) << FrequencyScaleShift;
-+            static constinit inline u64 s_tick_to_counter = UINT64_C(1) << FrequencyScaleShift;
++            /* Keep the actual counter frequency: truncating fixed-point conversion factors
++             * accumulates error with the absolute counter value and can schedule a deadline
++             * in the past on long-running hosts. */
++            static constinit inline u64 s_counter_frequency = static_cast<u64>(ams::svc::TicksPerSecond);
 +
 +            static void InitializeFrequencyScale();
 +        #endif
          private:
              s64 m_maximum_time;
          public:
-@@ -76,6 +90,20 @@ namespace ams::kern::arch::arm64 {
+@@ -76,6 +85,25 @@
                  cpu::CounterTimerPhysicalTimerControlRegisterAccessor(0).SetEnable(false).SetIMask(false).Store();
              }
  
 +            #if defined(ATMOSPHERE_BOARD_GENERIC_AARCH64)
 +            static ALWAYS_INLINE s64 GetCount() {
 +                const u64 counter = cpu::CounterTimerPhysicalCountValueRegisterAccessor().GetCount();
-+                return static_cast<s64>((static_cast<unsigned __int128>(counter) * s_counter_to_tick) >> FrequencyScaleShift);
++                const u64 nominal = static_cast<u64>(ams::svc::TicksPerSecond);
++                return static_cast<s64>((counter / s_counter_frequency) * nominal +
++                                        (counter % s_counter_frequency) * nominal / s_counter_frequency);
 +            }
 +
 +            static ALWAYS_INLINE void SetCompareValue(s64 value) {
 +                /* Round up, so that the interrupt never comes before the tick asked for; saturate */
 +                /* rather than wrap for a time too far away to represent. */
-+                const unsigned __int128 counter = ((static_cast<unsigned __int128>(value) * s_tick_to_counter) >> FrequencyScaleShift) + 1;
++                const u64 nominal = static_cast<u64>(ams::svc::TicksPerSecond);
++                const u64 ticks = static_cast<u64>(value);
++                const unsigned __int128 counter = static_cast<unsigned __int128>(ticks / nominal) * s_counter_frequency +
++                    ((ticks % nominal) * s_counter_frequency + nominal - 1) / nominal;
 +                const u64 compare = (counter > std::numeric_limits<s64>::max()) ? std::numeric_limits<u64>::max() : static_cast<u64>(counter);
 +                cpu::CounterTimerPhysicalTimerCompareValueRegisterAccessor(0).SetCompareValue(compare).Store();
 +            }
@@ -61,7 +54,7 @@ index 9ffe57934..942b593d4 100644
              static ALWAYS_INLINE s64 GetCount() {
                  return cpu::CounterTimerPhysicalCountValueRegisterAccessor().GetCount();
              }
-@@ -83,6 +111,7 @@ namespace ams::kern::arch::arm64 {
+@@ -83,6 +111,7 @@
              static ALWAYS_INLINE void SetCompareValue(s64 value) {
                  cpu::CounterTimerPhysicalTimerCompareValueRegisterAccessor(0).SetCompareValue(static_cast<u64>(value)).Store();
              }
@@ -69,27 +62,19 @@ index 9ffe57934..942b593d4 100644
          public:
              virtual KInterruptTask *OnInterrupt(s32 interrupt_id) override {
                  MESOSPHERE_UNUSED(interrupt_id);
-diff --git a/libraries/libmesosphere/source/arch/arm64/kern_k_hardware_timer.cpp b/libraries/libmesosphere/source/arch/arm64/kern_k_hardware_timer.cpp
-index 576ad03a4..a77120fd8 100644
 --- a/libraries/libmesosphere/source/arch/arm64/kern_k_hardware_timer.cpp
 +++ b/libraries/libmesosphere/source/arch/arm64/kern_k_hardware_timer.cpp
-@@ -17,7 +17,29 @@
+@@ -17,7 +17,23 @@
  
  namespace ams::kern::arch::arm64 {
  
 +    #if defined(ATMOSPHERE_BOARD_GENERIC_AARCH64)
 +    void KHardwareTimer::InitializeFrequencyScale() {
-+        /* Every core runs this with the same result, so it does not matter which is first. */
 +        u64 frequency;
 +        __asm__ __volatile__("mrs %0, cntfrq_el0" : "=r"(frequency));
-+        /* No rate reported, or already the nominal one: ticks are counter steps. A rate of 4 GHz or */
-+        /* more (Armv8.6 fixes it at 1 GHz) would overflow the factor below; leave that unscaled too. */
-+        if (frequency == 0 || frequency == static_cast<u64>(ams::svc::TicksPerSecond) || frequency >= (UINT64_C(1) << (64 - FrequencyScaleShift))) {
-+            return;
++        if (frequency != 0) {
++            s_counter_frequency = frequency;
 +        }
-+
-+        s_counter_to_tick = (static_cast<u64>(ams::svc::TicksPerSecond) << FrequencyScaleShift) / frequency;
-+        s_tick_to_counter = (frequency << FrequencyScaleShift) / static_cast<u64>(ams::svc::TicksPerSecond);
 +    }
 +    #endif
 +

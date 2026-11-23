@@ -1,0 +1,44 @@
+DEVKITPRO ?= /opt/devkitpro
+export DEVKITPRO
+TOOLCHAIN := $(DEVKITPRO)/devkitA64/bin/aarch64-none-elf-
+CXX := $(TOOLCHAIN)g++
+ELF2NSO := $(DEVKITPRO)/tools/bin/elf2nso
+NPDMTOOL := $(DEVKITPRO)/tools/bin/npdmtool
+HORIZON_MODULE_KIND := program
+VARIANT ?= release
+BUILD := build/native/$(VARIANT)
+OUT := out/nintendo_nx_arm64_armv8a/$(VARIANT)
+TARGET := $(OUT)/ftpd
+
+SOURCES := source/main.cpp source/ftp_server.cpp
+OBJECTS := $(foreach src,$(SOURCES),$(BUILD)/$(src).o)
+INCLUDES := -I$(DEVKITPRO)/libnx/include
+OPTIMIZATION := $(if $(filter release,$(VARIANT)),-O2,-Os)
+COMMON_FLAGS := -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft $(OPTIMIZATION) -g \
+    -Wall -Wextra -Werror -Wno-missing-field-initializers -fPIE -ffunction-sections -fdata-sections \
+    -fno-strict-aliasing -fwrapv -D__SWITCH__ -D_GNU_SOURCE $(INCLUDES)
+CXXFLAGS := $(COMMON_FLAGS) -std=gnu++23 -fno-exceptions -fno-rtti
+LDFLAGS := -specs=$(DEVKITPRO)/libnx/switch.specs -fPIE -march=armv8-a+crc+crypto -mtune=cortex-a57 \
+    -mtp=soft -Wl,-Map,$(TARGET).map -Wl,-z,relro,-z,now
+
+.PHONY: all clean
+all: $(TARGET).nso $(TARGET).npdm
+
+$(TARGET).nso: $(TARGET).elf
+	$(ELF2NSO) $< $@
+
+$(TARGET).npdm: ftpd.json
+	@mkdir -p $(OUT)
+	$(NPDMTOOL) $< $@
+
+$(TARGET).elf: $(OBJECTS)
+	@mkdir -p $(OUT)
+	$(CXX) $(LDFLAGS) $(OBJECTS) -L$(DEVKITPRO)/libnx/lib -lnx -o $@
+
+$(BUILD)/%.cpp.o: %.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -MMD -MP -c $< -o $@
+
+-include $(OBJECTS:.o=.d)
+clean:
+	rm -rf $(BUILD) $(OUT)
